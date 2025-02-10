@@ -1,0 +1,6 @@
+@CyrScanDashboard_HostAddress = http://localhost:5128
+
+GET {{CyrScanDashboard_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
