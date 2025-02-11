@@ -1,87 +1,37 @@
-// Models/ScanRecord.cs
-using Dapper;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using System.Collections.Generic;
-using System.Data.SqlClient;
-using System.Threading.Tasks;
+var builder = WebApplication.CreateBuilder(args);
 
-public class ScanRecord
+// Add this configuration to listen on all interfaces
+builder.WebHost.ConfigureKestrel(serverOptions =>
 {
-    public int Id { get; set; }
-    public int JobNumber { get; set; }
-    public string PartID { get; set; }
-    public int Quantity { get; set; }
-    public int ScannedQuantity { get; set; }
-    public DateTime ScanDate { get; set; }
+    serverOptions.ListenAnyIP(5128); // This makes the API accessible on all network interfaces
+});
+
+// Your existing configuration
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll",
+        builder =>
+        {
+            builder
+                .AllowAnyOrigin()
+                .AllowAnyMethod()
+                .AllowAnyHeader();
+        });
+});
+
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
 }
 
-[ApiController]
-[Route("api/[controller]")]
-public class DashboardController : ControllerBase
-{
-    private readonly string _connectionString = "Server=192.168.88.55,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;";
-
-    [HttpGet("jobs")]
-    public async Task<IActionResult> GetJobs()
-    {
-        using (var connection = new SqlConnection(_connectionString))
-        {
-            await connection.OpenAsync();
-
-            var query = @"
-                SELECT 
-                    JobNumber,
-                    COUNT(DISTINCT PartID) as TotalParts,
-                    SUM(Quantity) as TotalQuantity,
-                    SUM(ScannedQuantity) as TotalScanned,
-                    MAX(ScanDate) as LastScanDate
-                FROM ScannedTags
-                GROUP BY JobNumber
-                ORDER BY MAX(ScanDate) DESC";
-
-            var jobs = await connection.QueryAsync(query);
-            return Ok(jobs);
-        }
-    }
-
-    [HttpGet("jobs/{jobNumber}")]
-    public async Task<IActionResult> GetJobDetails(int jobNumber)
-    {
-        using (var connection = new SqlConnection(_connectionString))
-        {
-            await connection.OpenAsync();
-
-            var query = @"
-                SELECT *
-                FROM ScannedTags
-                WHERE JobNumber = @JobNumber
-                ORDER BY ScanDate DESC";
-
-            var details = await connection.QueryAsync<ScanRecord>(query, new { JobNumber = jobNumber });
-            return Ok(details);
-        }
-    }
-
-    [HttpGet("stats")]
-    public async Task<IActionResult> GetDashboardStats()
-    {
-        using (var connection = new SqlConnection(_connectionString))
-        {
-            await connection.OpenAsync();
-
-            var query = @"
-                SELECT 
-                    COUNT(DISTINCT JobNumber) as TotalJobs,
-                    SUM(ScannedQuantity) as TotalScannedItems,
-                    COUNT(DISTINCT PartID) as TotalUniqueParts,
-                    (SELECT TOP 1 JobNumber 
-                     FROM ScannedTags 
-                     ORDER BY ScanDate DESC) as LatestJob
-                FROM ScannedTags";
-
-            var stats = await connection.QuerySingleAsync(query);
-            return Ok(stats);
-        }
-    }
-}
+app.UseHttpsRedirection();
+app.UseCors("AllowAll");
+app.UseAuthorization();
+app.MapControllers();
+app.Run();
