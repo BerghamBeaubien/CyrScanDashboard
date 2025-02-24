@@ -1,4 +1,4 @@
-namespace YourProject.Models;
+namespace CyrScanDashboard.Models;
 
 public class ScanRecord
 {
@@ -8,4 +8,11 @@ public class ScanRecord
     public int Quantity { get; set; }
     public int ScannedQuantity { get; set; }
     public DateTime ScanDate { get; set; }
+}
+
+public class ScanRequest
+{
+    public int JobNumber { get; set; }
+    public string PartID { get; set; }
+    public int Quantity { get; set; }
 }
