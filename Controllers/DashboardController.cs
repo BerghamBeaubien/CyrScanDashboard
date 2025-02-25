@@ -9,6 +9,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using CyrScanDashboard.Services;
 
 namespace CyrScanDashboard.Controllers;
 
@@ -17,7 +18,12 @@ namespace CyrScanDashboard.Controllers;
 public class DashboardController : ControllerBase
 {
     private readonly string _connectionString = "Server=192.168.88.55,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;";
+    private readonly ExcelValidationService _excelValidationService;
 
+    public DashboardController(ExcelValidationService excelValidationService)
+    {
+        _excelValidationService = excelValidationService;
+    }
     [HttpGet("jobs")]
     public async Task<IActionResult> GetJobs()
     {
@@ -151,16 +157,34 @@ public class DashboardController : ControllerBase
     [HttpPost("scan")]
     public async Task<IActionResult> AddScan([FromBody] ScanRequest request)
     {
+        // Validate the part against Excel data
+        var validationResult = _excelValidationService.ValidatePart(
+            request.JobNumber,
+            request.PartID,
+            request.Quantity
+        );
+
+        if (!validationResult.isValid)
+        {
+            // Return the validation error
+            return BadRequest(new
+            {
+                success = false,
+                message = validationResult.message,
+                expectedQuantity = validationResult.expectedQuantity
+            });
+        }
+
+        // If valid, proceed with database operations
         using (var connection = new SqlConnection(_connectionString))
         {
             await connection.OpenAsync();
 
             // Check if entry exists
             var checkQuery = @"
-            SELECT ScannedQuantity 
-            FROM ScannedTags 
-            WHERE JobNumber = @JobNumber AND PartID = @PartID";
-
+        SELECT ScannedQuantity 
+        FROM ScannedTags 
+        WHERE JobNumber = @JobNumber AND PartID = @PartID";
             var existingQuantity = await connection.QuerySingleOrDefaultAsync<int?>(
                 checkQuery,
                 new { request.JobNumber, request.PartID }
@@ -170,12 +194,11 @@ public class DashboardController : ControllerBase
             {
                 // Update existing entry
                 var updateQuery = @"
-                UPDATE ScannedTags 
-                SET ScannedQuantity = @NewQuantity, 
-                    ScanDate = @ScanDate 
-                WHERE JobNumber = @JobNumber 
-                AND PartID = @PartID";
-
+            UPDATE ScannedTags 
+            SET ScannedQuantity = @NewQuantity, 
+                ScanDate = @ScanDate 
+            WHERE JobNumber = @JobNumber 
+            AND PartID = @PartID";
                 await connection.ExecuteAsync(updateQuery, new
                 {
                     NewQuantity = existingQuantity.Value + 1,
@@ -188,24 +211,28 @@ public class DashboardController : ControllerBase
             {
                 // Insert new entry
                 var insertQuery = @"
-                INSERT INTO ScannedTags (
-                    JobNumber, PartID, Quantity, 
-                    ScannedQuantity, ScanDate, TotalQuantityJob
-                ) VALUES (
-                    @JobNumber, @PartID, @Quantity, 
-                    1, @ScanDate, @Quantity
-                )";
-
+            INSERT INTO ScannedTags (
+                JobNumber, PartID, Quantity, 
+                ScannedQuantity, ScanDate, TotalQuantityJob
+            ) VALUES (
+                @JobNumber, @PartID, @Quantity, 
+                1, @ScanDate, @TotalQuantityJob
+            )";
                 await connection.ExecuteAsync(insertQuery, new
                 {
                     request.JobNumber,
                     request.PartID,
                     request.Quantity,
+                    TotalQuantityJob = validationResult.totalQuantityJob,
                     ScanDate = DateTime.Now
                 });
             }
 
-            return Ok(new { message = "Scan saved successfully" });
+            return Ok(new
+            {
+                success = true,
+                message = "Scan saved successfully"
+            });
         }
     }
 }

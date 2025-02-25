@@ -1,3 +1,4 @@
+using CyrScanDashboard.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add this configuration to listen on all interfaces
@@ -21,6 +22,8 @@ builder.Services.AddCors(options =>
                 .AllowAnyHeader();
         });
 });
+
+builder.Services.AddSingleton<ExcelValidationService>();
 
 var app = builder.Build();
 
