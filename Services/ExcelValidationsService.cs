@@ -21,39 +21,41 @@ namespace CyrScanDashboard.Services
             }
         }
 
-        public (bool isValid, string message) ValidatePart(string jobNumber, string partId, string qrCode)
+        public (bool isValid, string message, int totalQty) ValidatePart(string jobNumber, string partId, string qrCode)
         {
             try
             {
-                // Get or load job data
-                var jobParts = GetJobParts(jobNumber);
+                // Get or load job data and total quantity
+                var (jobParts, totalQty) = GetJobPartsWithTotal(jobNumber);
                 if (jobParts == null)
                 {
-                    return (false, "Fichier Excel introuvable !");
+                    return (false, "Fichier Excel introuvable !", 0);
                 }
 
                 // Validate part existence - we only care that the partId exists in the Excel file
                 if (jobParts.Contains(partId))
                 {
-                    return (true, "Tag validé !");
+                    return (true, "Tag validé !", totalQty);
                 }
                 else
                 {
-                    return (false, "PartID introuvable dans Excel !");
+                    return (false, "PartID introuvable dans Excel !", totalQty);
                 }
             }
             catch (Exception ex)
             {
-                return (false, $"Erreur de validation: {ex.Message}");
+                return (false, $"Erreur de validation: {ex.Message}", 0);
             }
         }
 
-        private HashSet<string> GetJobParts(string jobNumber)
+        private (HashSet<string>, int) GetJobPartsWithTotal(string jobNumber)
         {
             // Return from cache if exists
             if (_jobCache.TryGetValue(jobNumber, out var cachedData))
             {
-                return cachedData;
+                // We need to get the total from the Excel file since it's not cached
+                int totalQty = CalculateTotalQuantity(jobNumber);
+                return (cachedData, totalQty);
             }
 
             // Otherwise load from file
@@ -63,11 +65,10 @@ namespace CyrScanDashboard.Services
 
             if (matchingFiles.Length == 0)
             {
-                return null;
+                return (null, 0);
             }
 
             string excelPath = matchingFiles[0];
-            var jobParts = new HashSet<string>();
             string tempFilePath = null;
 
             try
@@ -75,7 +76,7 @@ namespace CyrScanDashboard.Services
                 // Try to open the file directly first
                 using (var fileStream = File.Open(excelPath, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
-                    return ProcessExcelFile(fileStream, jobNumber);
+                    return ProcessExcelFileWithTotal(fileStream, jobNumber);
                 }
             }
             catch (IOException) // File is likely locked
@@ -91,13 +92,13 @@ namespace CyrScanDashboard.Services
 
                     using (var fileStream = File.Open(tempFilePath, FileMode.Open, FileAccess.Read))
                     {
-                        return ProcessExcelFile(fileStream, jobNumber);
+                        return ProcessExcelFileWithTotal(fileStream, jobNumber);
                     }
                 }
                 catch (Exception ex)
                 {
                     // Log the error if needed
-                    return null;
+                    return (null, 0);
                 }
                 finally
                 {
@@ -118,7 +119,7 @@ namespace CyrScanDashboard.Services
             catch (Exception)
             {
                 // Handle other exceptions
-                return null;
+                return (null, 0);
             }
         }
 
@@ -359,75 +360,148 @@ namespace CyrScanDashboard.Services
             return jobParts;
         }
 
-        public int GetK1Value(string jobNumber)
+        private (HashSet<string>, int) ProcessExcelFileWithTotal(FileStream fileStream, string jobNumber)
         {
+            var jobParts = new HashSet<string>();
+            int totalQty = 0;
+
+            using (var reader = ExcelReaderFactory.CreateReader(fileStream))
+            {
+                var result = reader.AsDataSet();
+                DataTable worksheet = result.Tables["CONTROLE"];
+
+                if (worksheet == null)
+                {
+                    return (null, 0);
+                }
+
+                var totalTagsCell = worksheet.Rows[0][10]; // K1
+                int k1Value = Convert.ToInt32(totalTagsCell);
+
+                // If K1 is 0, determine the total by summing values in column D until we hit a 0
+                int totalRows;
+                if (k1Value == 0)
+                {
+                    totalRows = 1; // Start from row 2 (index 1)
+                    while (totalRows < worksheet.Rows.Count)
+                    {
+                        var dValue = worksheet.Rows[totalRows][3]; // D column (index 3)
+                        if (dValue == null || Convert.ToInt32(dValue) == 0)
+                        {
+                            break;
+                        }
+                        totalRows++;
+                    }
+
+                    // Calculate total quantity by summing D column values
+                    totalQty = 0;
+                    for (int row = 1; row <= totalRows; row++)
+                    {
+                        var dValue = worksheet.Rows[row][3]; // D column (index 3)
+                        if (dValue != null)
+                        {
+                            totalQty += Convert.ToInt32(dValue);
+                        }
+                    }
+                }
+                else
+                {
+                    totalRows = k1Value;
+                    totalQty = k1Value; // Set totalQty to K1 value if it's not 0
+                }
+
+                for (int row = 1; row <= totalRows; row++)
+                {
+                    string excelPartId = worksheet.Rows[row][0]?.ToString()?.Trim(); // A column (index 0)
+
+                    // If A column is empty, use C column
+                    if (string.IsNullOrEmpty(excelPartId))
+                    {
+                        string cColumnPartId = worksheet.Rows[row][2]?.ToString()?.Trim(); // C column (index 2)
+                        if (!string.IsNullOrEmpty(cColumnPartId))
+                        {
+                            // Just add the part ID once to the HashSet regardless of quantity
+                            jobParts.Add(cColumnPartId);
+                        }
+                    }
+                    else
+                    {
+                        // Original behavior for when A column has data
+                        jobParts.Add(excelPartId);
+                    }
+                }
+            }
+
+            // Store in cache
+            _jobCache[jobNumber] = jobParts;
+            return (jobParts, totalQty);
+        }
+
+        private int CalculateTotalQuantity(string jobNumber)
+        {
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+            string searchPattern = $"{jobNumber}*.xlsm";
+            string[] matchingFiles = Directory.GetFiles(_excelBasePath, searchPattern);
+
+            if (matchingFiles.Length == 0)
+            {
+                return 0;
+            }
+
+            string excelPath = matchingFiles[0];
+            string tempFilePath = null;
+
             try
             {
-                System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
-                string searchPattern = $"{jobNumber}*.xlsm";
-                string[] matchingFiles = Directory.GetFiles(_excelBasePath, searchPattern);
+                // Try to open the file directly first
+                using (var fileStream = File.Open(excelPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    return CalculateTotalQuantityFromStream(fileStream);
+                }
+            }
+            catch (IOException) // File is likely locked
+            {
+                try
+                {
+                    // Create a temporary copy
+                    string fileName = Path.GetFileName(excelPath);
+                    tempFilePath = Path.Combine(_tempFolderPath, $"temp_{Guid.NewGuid()}_{fileName}");
 
-                if (matchingFiles.Length == 0)
+                    // Copy with FileShare.ReadWrite to allow copying even when file is in use
+                    File.Copy(excelPath, tempFilePath, true);
+
+                    using (var fileStream = File.Open(tempFilePath, FileMode.Open, FileAccess.Read))
+                    {
+                        return CalculateTotalQuantityFromStream(fileStream);
+                    }
+                }
+                catch (Exception)
                 {
                     return 0;
                 }
-
-                string excelPath = matchingFiles[0];
-                string tempFilePath = null;
-
-                try
+                finally
                 {
-                    // Try to open the file directly first
-                    using (var fileStream = File.Open(excelPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    // Clean up temp file if it exists
+                    if (tempFilePath != null && File.Exists(tempFilePath))
                     {
-                        return GetK1ValueFromStream(fileStream);
-                    }
-                }
-                catch (IOException) // File is likely locked
-                {
-                    try
-                    {
-                        // Create a temporary copy
-                        string fileName = Path.GetFileName(excelPath);
-                        tempFilePath = Path.Combine(_tempFolderPath, $"temp_{Guid.NewGuid()}_{fileName}");
-
-                        // Copy with FileShare.ReadWrite to allow copying even when file is in use
-                        File.Copy(excelPath, tempFilePath, true);
-
-                        using (var fileStream = File.Open(tempFilePath, FileMode.Open, FileAccess.Read))
+                        try
                         {
-                            return GetK1ValueFromStream(fileStream);
+                            File.Delete(tempFilePath);
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        // Log the error if needed
-                        return 0;
-                    }
-                    finally
-                    {
-                        // Clean up temp file if it exists
-                        if (tempFilePath != null && File.Exists(tempFilePath))
+                        catch
                         {
-                            try
-                            {
-                                File.Delete(tempFilePath);
-                            }
-                            catch
-                            {
-                                // Ignore cleanup errors
-                            }
+                            // Ignore cleanup errors
                         }
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 return 0;
             }
         }
 
-        private int GetK1ValueFromStream(FileStream fileStream)
+        private int CalculateTotalQuantityFromStream(FileStream fileStream)
         {
             using (var reader = ExcelReaderFactory.CreateReader(fileStream))
             {
@@ -440,7 +514,31 @@ namespace CyrScanDashboard.Services
                 }
 
                 var totalTagsCell = worksheet.Rows[0][10]; // K1
-                return Convert.ToInt32(totalTagsCell);
+                int k1Value = Convert.ToInt32(totalTagsCell);
+
+                // If K1 is 0, calculate total by summing D column
+                if (k1Value == 0)
+                {
+                    int totalQty = 0;
+                    int row = 1;
+
+                    while (row < worksheet.Rows.Count)
+                    {
+                        var dValue = worksheet.Rows[row][3]; // D column (index 3)
+                        if (dValue == null || Convert.ToInt32(dValue) == 0)
+                        {
+                            break;
+                        }
+                        totalQty += Convert.ToInt32(dValue);
+                        row++;
+                    }
+
+                    return totalQty;
+                }
+                else
+                {
+                    return k1Value;
+                }
             }
         }
     }

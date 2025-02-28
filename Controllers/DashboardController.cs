@@ -281,6 +281,8 @@ public class DashboardController : ControllerBase
             });
         }
 
+        request.QRCode = FormatQRCode(request.QRCode);
+
         // Validate the part ID against Excel data
         var validationResult = _excelValidationService.ValidatePart(
             request.JobNumber,
@@ -315,17 +317,17 @@ public class DashboardController : ControllerBase
             }
 
             // Get TotalQuantityJob from Excel
-            int totalQuantityJob = _excelValidationService.GetK1Value(request.JobNumber);
+            int totalQuantityJob = validationResult.totalQty;
 
             // Insert new scan record with TotalQuantityJob
             var insertQuery = @"
-        INSERT INTO ScannedTags (
-            JobNumber, PartID, QRCode, 
-            ScanDate, PalletId, TotalQuantityJob
-        ) VALUES (
-            @JobNumber, @PartID, @QRCode, 
-            @ScanDate, @PalletId, @TotalQuantityJob
-        )";
+            INSERT INTO ScannedTags (
+                JobNumber, PartID, QRCode, 
+                ScanDate, PalletId, TotalQuantityJob
+            ) VALUES (
+                @JobNumber, @PartID, @QRCode, 
+                @ScanDate, @PalletId, @TotalQuantityJob
+            )";
 
             await connection.ExecuteAsync(insertQuery, new
             {
@@ -402,7 +404,7 @@ public class DashboardController : ControllerBase
 
             // 1. Get basic job data from Excel
             var excelParts = _excelValidationService.GetExcelJobDetails(jobNumber);
-            var totalParts = _excelValidationService.GetK1Value(jobNumber);
+            var totalParts = excelParts.Count();
 
             // 2. Get all scan details for all parts in one query
             var scanDetailsQuery = @"
@@ -490,5 +492,19 @@ public class DashboardController : ControllerBase
 
             return Ok(palletContents);
         }
+    }
+
+    //Methode pour Ajouter un 0 avant le numero de sequence si le numero est inferieur a 10
+    private string FormatQRCode(string qrCode)
+    {
+        if (string.IsNullOrWhiteSpace(qrCode)) return qrCode;
+
+        var parts = qrCode.Split('-');
+        if (parts.Length > 1 && int.TryParse(parts[^1], out int lastNumber) && lastNumber is >= 1 and <= 9)
+        {
+            parts[^1] = $"0{lastNumber}"; // Prepend 0 if it's a single digit
+        }
+
+        return string.Join("-", parts);
     }
 }
