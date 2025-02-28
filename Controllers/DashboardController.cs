@@ -2,14 +2,9 @@ using Microsoft.AspNetCore.Mvc;
 using System.Data.SqlClient;
 using Dapper;
 using CyrScanDashboard.Models;
-using ExcelDataReader;
 using System.Data;
-using System.IO;
-using System.Collections.Concurrent;
-using System.Net;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
 using CyrScanDashboard.Services;
+using Microsoft.IdentityModel.Tokens;
 
 namespace CyrScanDashboard.Controllers;
 
@@ -24,6 +19,7 @@ public class DashboardController : ControllerBase
     {
         _excelValidationService = excelValidationService;
     }
+
     [HttpGet("jobs")]
     public async Task<IActionResult> GetJobs()
     {
@@ -31,45 +27,82 @@ public class DashboardController : ControllerBase
         {
             await connection.OpenAsync();
             var query = @"
-                SELECT 
-                    JobNumber,
-                    COUNT(DISTINCT PartID) AS TotalParts,
-                    SUM(Quantity) AS TotalQuantity, -- Quantité totale des tags scannés
-                    SUM(ScannedQuantity) AS TotalScanned, -- Quantité effectivement scannée
-                    (SELECT SUM(TotalQuantityJob) FROM ScannedTags s WHERE s.JobNumber = t.JobNumber) AS TotalQuantityJob, -- Nouvelle colonne
-                    MAX(ScanDate) AS LastScanDate
-                FROM ScannedTags t
-                GROUP BY JobNumber
-                ORDER BY MAX(ScanDate) DESC";
-            var jobs = await connection.QueryAsync(query);
+            SELECT 
+                JobNumber,
+                COUNT(DISTINCT PartID) AS TotalParts,
+                COUNT(QRCode) AS TotalScanned,
+                COUNT(DISTINCT PalletId) AS TotalPallets,
+                MAX(TotalQuantityJob) AS TotalExpected,
+                MAX(ScanDate) AS LastScanDate
+            FROM ScannedTags
+            GROUP BY JobNumber
+            ORDER BY MAX(ScanDate) DESC";
+
+            var jobs = await connection.QueryAsync<JobSummary>(query);
             return Ok(jobs);
         }
     }
 
     [HttpGet("jobs/{jobNumber}")]
-    public async Task<IActionResult> GetJobDetails(int jobNumber)
+    public async Task<IActionResult> GetJobDetails(string jobNumber)
+    {
+        using (var connection = new SqlConnection(_connectionString))
+        {
+            await connection.OpenAsync();
+
+            // Récupérer les informations des pièces scanées
+            var query = @"
+            SELECT 
+                s.PartID,
+                COUNT(s.QRCode) AS ScannedCount,
+                MAX(s.ScanDate) AS LastScanDate,
+                STUFF((
+                    SELECT DISTINCT ', ' + p.Name
+                    FROM Pallets p
+                    INNER JOIN ScannedTags st ON p.Id = st.PalletId
+                    WHERE st.PartID = s.PartID AND st.JobNumber = @JobNumber
+                    FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '') AS Pallets
+            FROM ScannedTags s
+            WHERE s.JobNumber = @JobNumber
+            GROUP BY s.PartID
+            ORDER BY MAX(s.ScanDate) DESC";
+
+            var details = await connection.QueryAsync(query, new { JobNumber = jobNumber });
+
+            // Utiliser le service pour récupérer les informations Excel
+            var excelParts = _excelValidationService.GetExcelJobDetails(jobNumber);
+            var totalParts = excelParts.Count();
+
+            // Combiner les résultats
+            var result = new
+            {
+                DatabaseParts = details,
+                TotalParts = totalParts,
+                ExcelParts = excelParts,
+                JobNumber = jobNumber
+            };
+
+            return Ok(result);
+        }
+    }
+
+    [HttpGet("parts/{jobNumber}/{partId}")]
+    public async Task<IActionResult> GetPartDetails(string jobNumber, string partId)
     {
         using (var connection = new SqlConnection(_connectionString))
         {
             await connection.OpenAsync();
             var query = @"
                 SELECT 
-                    s.PartID,
-                    s.Quantity,
-                    s.ScannedQuantity,
-                    s.ScanDate,
-                    q.TotalQuantityJob
-                FROM ScannedTags s
-                INNER JOIN (
-                    SELECT JobNumber, SUM(TotalQuantityJob) AS TotalQuantityJob
-                    FROM ScannedTags
-                    WHERE JobNumber = @JobNumber
-                    GROUP BY JobNumber
-                ) q ON s.JobNumber = q.JobNumber
-                WHERE s.JobNumber = @JobNumber
-                ORDER BY s.ScanDate DESC";
+                    st.QRCode,
+                    p.Name AS PalletName,
+                    st.ScanDate
+                FROM ScannedTags st
+                JOIN Pallets p ON st.PalletId = p.Id
+                WHERE st.JobNumber = @JobNumber AND st.PartID = @PartID
+                ORDER BY st.ScanDate DESC";
 
-            var details = await connection.QueryAsync<ScanRecord>(query, new { JobNumber = jobNumber });
+            var details = await connection.QueryAsync(query, new { JobNumber = jobNumber, PartID = partId });
             return Ok(details);
         }
     }
@@ -81,158 +114,381 @@ public class DashboardController : ControllerBase
         {
             await connection.OpenAsync();
             var query = @"
-                SELECT 
-                    COUNT(DISTINCT JobNumber) AS TotalJobs,
-                    COUNT(DISTINCT PartID) AS TotalUniqueParts,
-                    SUM(TotalQuantityJob) AS TotalQuantityJob,
-                    SUM(ScannedQuantity) AS TotalScannedItems,
-                    (SELECT TOP 1 JobNumber 
-                     FROM ScannedTags 
-                     ORDER BY ScanDate DESC) AS LatestJob
-                FROM (
-                    SELECT JobNumber, PartID, SUM(Quantity) AS TotalQuantityJob, SUM(ScannedQuantity) AS ScannedQuantity
-                    FROM ScannedTags
-                    GROUP BY JobNumber, PartID
-                ) AS JobQuantities";
+            SELECT 
+                COUNT(DISTINCT JobNumber) AS TotalJobs,
+                COUNT(DISTINCT PartID) AS TotalUniqueParts,
+                COUNT(*) AS TotalScannedItems,
+                (SELECT TOP 1 JobNumber 
+                 FROM ScannedTags 
+                 ORDER BY ScanDate DESC) AS LatestJob,
+                (SELECT COUNT(DISTINCT Id) FROM Pallets) AS TotalPallets
+            FROM ScannedTags";
+
             var stats = await connection.QuerySingleAsync(query);
             return Ok(stats);
         }
     }
 
-    [HttpDelete("delete")]
-    public async Task<IActionResult> DeleteScan([FromBody] ScanRequest request)
+    [HttpGet("pallets/{jobNumber}")]
+    public async Task<IActionResult> GetPalletsByJob(string jobNumber)
     {
         using (var connection = new SqlConnection(_connectionString))
         {
             await connection.OpenAsync();
 
-            var checkQuery = @"
-        SELECT ScannedQuantity 
-        FROM ScannedTags 
-        WHERE JobNumber = @JobNumber AND PartID = @PartID";
+            // Get all pallets for this job
+            var palletsQuery = @"
+            SELECT Id, JobNumber, Name, CreatedDate, SequenceNumber
+            FROM Pallets
+            WHERE JobNumber = @JobNumber
+            ORDER BY SequenceNumber";
 
-            var existingQuantity = await connection.QuerySingleOrDefaultAsync<int?>(
-                checkQuery,
-                new { request.JobNumber, request.PartID }
-            );
+            var pallets = await connection.QueryAsync<Pallet>(palletsQuery, new { JobNumber = jobNumber });
 
-            if (!existingQuantity.HasValue)
+            // For each pallet, count the scanned items
+            var result = new List<Pallet>();
+            foreach (var pallet in pallets)
             {
-                return NotFound(new { message = "Tag non trouvé" });
+                var countQuery = @"
+                SELECT COUNT(*) 
+                FROM ScannedTags
+                WHERE PalletId = @PalletId";
+
+                var scannedCount = await connection.ExecuteScalarAsync<int>(countQuery, new { PalletId = pallet.Id });
+
+                pallet.ScannedItems = scannedCount;
+                result.Add(pallet);
             }
 
-            if (existingQuantity.Value > 1)
-            {
-                // Reduce quantity by 1
-                var updateQuery = @"
-            UPDATE ScannedTags 
-            SET ScannedQuantity = ScannedQuantity - 1, 
-                ScanDate = @ScanDate 
-            WHERE JobNumber = @JobNumber 
-            AND PartID = @PartID";
+            return Ok(result);
+        }
+    }
 
-                await connection.ExecuteAsync(updateQuery, new
+    [HttpPost("pallets")]
+    public async Task<IActionResult> CreatePallet([FromBody] CreatePalletRequest request)
+    {
+        try
+        {
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                await connection.OpenAsync();
+
+                // Check if JobNumber is valid
+                if (string.IsNullOrEmpty(request.JobNumber))
                 {
-                    ScanDate = DateTime.Now,
-                    request.JobNumber,
-                    request.PartID
-                });
+                    return BadRequest(new { message = "JobNumber invalide." });
+                }
 
-                return Ok(new { message = "Quantité réduite de 1" });
+                // Get the next sequence number for this job
+                var sequenceQuery = @"
+                SELECT ISNULL(MAX(SequenceNumber), 0) + 1 
+                FROM Pallets
+                WHERE JobNumber = @JobNumber";
+
+                var nextSequence = await connection.ExecuteScalarAsync<int>(sequenceQuery,
+                    new { JobNumber = request.JobNumber });
+
+                // Automatically create a name (PAL + sequence)
+                string palletName = $"PAL{nextSequence}";
+
+                // Execute the stored procedure
+                var parameters = new DynamicParameters();
+                parameters.Add("@JobNumber", request.JobNumber);
+                parameters.Add("@Name", palletName);
+
+                var newPallet = await connection.QuerySingleAsync<Pallet>(
+                    "CreateNewPallet",
+                    parameters,
+                    commandType: CommandType.StoredProcedure);
+
+                // New pallet has no items yet
+                newPallet.ScannedItems = 0;
+
+                return Ok(newPallet);
             }
-            else
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = $"Erreur: {ex.Message}" });
+        }
+    }
+
+    [HttpPut("pallets/{id}")]
+    public async Task<IActionResult> UpdatePalletName(int id, [FromBody] UpdatePalletRequest request)
+    {
+        try
+        {
+            using (var connection = new SqlConnection(_connectionString))
             {
-                // Delete the record if quantity is 1
-                var deleteQuery = @"
-            DELETE FROM ScannedTags
-            WHERE JobNumber = @JobNumber AND PartID = @PartID";
+                await connection.OpenAsync();
 
-                await connection.ExecuteAsync(deleteQuery, new { request.JobNumber, request.PartID });
+                var updateQuery = @"
+                UPDATE Pallets
+                SET Name = @Name
+                WHERE Id = @Id";
 
-                return Ok(new { message = "Tag supprimé avec succès" });
+                var rowsAffected = await connection.ExecuteAsync(updateQuery, new { Id = id, Name = request.Name });
+
+                if (rowsAffected == 0)
+                    return NotFound("Palette non trouvée");
+
+                return Ok(new { message = "Palette mise à jour avec succès" });
             }
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = $"Erreur: {ex.Message}" });
+        }
+    }
+
+    [HttpDelete("pallets/{id}")]
+    public async Task<IActionResult> DeletePallet(int id)
+    {
+        try
+        {
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                await connection.OpenAsync();
+
+                var deleteQuery = @"
+                DELETE FROM Pallets
+                WHERE Id = @Id";
+
+                var rowsAffected = await connection.ExecuteAsync(deleteQuery, new { Id = id });
+
+                if (rowsAffected == 0)
+                    return NotFound("Palette non trouvée");
+
+                return Ok(new { message = "Palette supprimée avec succès" });
+            }
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = $"Erreur: {ex.Message}" });
         }
     }
 
     [HttpPost("scan")]
     public async Task<IActionResult> AddScan([FromBody] ScanRequest request)
     {
-        // Validate the part against Excel data
+        // Validate the pallet ID
+        if (request.PalletId <= 0)
+        {
+            return BadRequest(new
+            {
+                success = false,
+                message = "Une palette doit être sélectionnée pour scanner des pièces"
+            });
+        }
+
+        // Validate the part ID against Excel data
         var validationResult = _excelValidationService.ValidatePart(
             request.JobNumber,
             request.PartID,
-            request.Quantity
+            request.QRCode
         );
 
         if (!validationResult.isValid)
         {
-            // Return the validation error
             return BadRequest(new
             {
                 success = false,
-                message = validationResult.message,
-                expectedQuantity = validationResult.expectedQuantity
+                message = validationResult.message
             });
         }
 
-        // If valid, proceed with database operations
         using (var connection = new SqlConnection(_connectionString))
         {
             await connection.OpenAsync();
 
-            // Check if entry exists
-            var checkQuery = @"
-        SELECT ScannedQuantity 
-        FROM ScannedTags 
-        WHERE JobNumber = @JobNumber AND PartID = @PartID";
-            var existingQuantity = await connection.QuerySingleOrDefaultAsync<int?>(
-                checkQuery,
-                new { request.JobNumber, request.PartID }
-            );
+            // Check if QR code already scanned
+            var checkQuery = "SELECT COUNT(*) FROM ScannedTags WHERE QRCode = @QRCode";
+            var exists = await connection.ExecuteScalarAsync<int>(checkQuery, new { request.QRCode });
 
-            if (existingQuantity.HasValue)
+            if (exists > 0)
             {
-                // Update existing entry
-                var updateQuery = @"
-            UPDATE ScannedTags 
-            SET ScannedQuantity = @NewQuantity, 
-                ScanDate = @ScanDate 
-            WHERE JobNumber = @JobNumber 
-            AND PartID = @PartID";
-                await connection.ExecuteAsync(updateQuery, new
+                return BadRequest(new
                 {
-                    NewQuantity = existingQuantity.Value + 1,
-                    ScanDate = DateTime.Now,
-                    request.JobNumber,
-                    request.PartID
+                    success = false,
+                    message = "Ce QR code a déjà été scanné"
                 });
             }
-            else
+
+            // Get TotalQuantityJob from Excel
+            int totalQuantityJob = _excelValidationService.GetK1Value(request.JobNumber);
+
+            // Insert new scan record with TotalQuantityJob
+            var insertQuery = @"
+        INSERT INTO ScannedTags (
+            JobNumber, PartID, QRCode, 
+            ScanDate, PalletId, TotalQuantityJob
+        ) VALUES (
+            @JobNumber, @PartID, @QRCode, 
+            @ScanDate, @PalletId, @TotalQuantityJob
+        )";
+
+            await connection.ExecuteAsync(insertQuery, new
             {
-                // Insert new entry
-                var insertQuery = @"
-            INSERT INTO ScannedTags (
-                JobNumber, PartID, Quantity, 
-                ScannedQuantity, ScanDate, TotalQuantityJob
-            ) VALUES (
-                @JobNumber, @PartID, @Quantity, 
-                1, @ScanDate, @TotalQuantityJob
-            )";
-                await connection.ExecuteAsync(insertQuery, new
-                {
-                    request.JobNumber,
-                    request.PartID,
-                    request.Quantity,
-                    TotalQuantityJob = validationResult.totalQuantityJob,
-                    ScanDate = DateTime.Now
-                });
-            }
+                request.JobNumber,
+                request.PartID,
+                request.QRCode,
+                ScanDate = DateTime.Now,
+                request.PalletId,
+                TotalQuantityJob = totalQuantityJob
+            });
 
             return Ok(new
             {
                 success = true,
                 message = "Scan saved successfully"
             });
+        }
+    }
+
+    [HttpDelete("delete")]
+    public async Task<IActionResult> DeleteScan([FromBody] DeleteScanRequest request)
+    {
+        using (var connection = new SqlConnection(_connectionString))
+        {
+            await connection.OpenAsync();
+
+            var deleteQuery = @"
+            DELETE FROM ScannedTags
+            WHERE JobNumber = @JobNumber 
+            AND PartID = @PartID
+            AND QRCode = @QRCode
+            AND PalletId = @PalletId";
+
+            var rowsAffected = await connection.ExecuteAsync(deleteQuery, new
+            {
+                request.JobNumber,
+                request.PartID,
+                request.QRCode,
+                request.PalletId
+            });
+
+            if (rowsAffected == 0)
+            {
+                return NotFound(new { message = "Scan non trouvé" });
+            }
+
+            return Ok(new { message = "Scan supprimé avec succès" });
+        }
+    }
+
+    [HttpGet("unscanned-pallets")]
+    public async Task<IActionResult> GetUnscannedPallets()
+    {
+        using (var connection = new SqlConnection(_connectionString))
+        {
+            await connection.OpenAsync();
+            var query = @"
+        SELECT p.*
+        FROM Pallets p
+        LEFT JOIN ScannedTags s ON p.Id = s.PalletId
+        WHERE s.PalletId IS NULL";
+
+            var pallets = await connection.QueryAsync<Pallet>(query);
+            return Ok(pallets);
+        }
+    }
+
+    [HttpGet("jobs/{jobNumber}/complete")]
+    public async Task<IActionResult> GetCompleteJobDetails(string jobNumber)
+    {
+        using (var connection = new SqlConnection(_connectionString))
+        {
+            await connection.OpenAsync();
+
+            // 1. Get basic job data from Excel
+            var excelParts = _excelValidationService.GetExcelJobDetails(jobNumber);
+            var totalParts = _excelValidationService.GetK1Value(jobNumber);
+
+            // 2. Get all scan details for all parts in one query
+            var scanDetailsQuery = @"
+            SELECT 
+                st.PartID,
+                st.QRCode,
+                p.Name AS PalletName,
+                st.ScanDate
+            FROM ScannedTags st
+            JOIN Pallets p ON st.PalletId = p.Id
+            WHERE st.JobNumber = @JobNumber
+            ORDER BY st.ScanDate DESC";
+
+            var allScans = await connection.QueryAsync(scanDetailsQuery, new { JobNumber = jobNumber });
+
+            // 3. Group scans by PartID for easier processing on frontend
+            var scansByPart = allScans.GroupBy(s => s.PartID)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.Select(s => new {
+                        s.QRCode,
+                        s.PalletName,
+                        s.ScanDate
+                    }).ToList()
+                );
+
+            // 4. Create summary data (similar to original job details endpoint)
+            var partSummaries = scansByPart.Select(kvp => {
+                var partId = kvp.Key;
+                var scans = kvp.Value;
+
+                // Count unique sequences for actual scanned count
+                var uniqueSequences = new HashSet<string>();
+                foreach (var scan in scans)
+                {
+                    var qrParts = scan.QRCode?.ToString().Split('-');
+                    var sequence = qrParts != null && qrParts.Length > 0 ? qrParts[qrParts.Length - 1] : "";
+                    if (!string.IsNullOrEmpty(sequence))
+                    {
+                        uniqueSequences.Add(sequence);
+                    }
+                }
+
+                return new
+                {
+                    PartID = partId,
+                    ScannedCount = uniqueSequences.Count,
+                    LastScanDate = scans.Count > 0 ? scans.Max(s => s.ScanDate) : null,
+                    Pallets = string.Join(", ", scans.Select(s => s.PalletName).Distinct())
+                };
+            }).ToList();
+
+            // 5. Combine everything into a single response
+            var result = new
+            {
+                DatabaseParts = partSummaries,
+                ScanDetails = scansByPart,
+                TotalParts = totalParts,
+                ExcelParts = excelParts,
+                JobNumber = jobNumber
+            };
+
+            return Ok(result);
+        }
+    }
+
+    [HttpGet("palletContents/{palletId}")]
+    public async Task<IActionResult> GetPalletContents(int palletId)
+    {
+        using (var connection = new SqlConnection(_connectionString))
+        {
+            await connection.OpenAsync();
+
+            // Get all scanned items for this pallet with only the requested fields
+            var contentsQuery = @"
+                SELECT 
+                    PartId as partId,
+                    QrCode as qrCode,
+                    ScanDate as scanDate
+                FROM ScannedTags
+                WHERE PalletId = @PalletId
+                ORDER BY ScanDate DESC";
+
+            var palletContents = await connection.QueryAsync(contentsQuery, new { PalletId = palletId });
+
+            return Ok(palletContents);
         }
     }
 }
