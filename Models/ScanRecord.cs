@@ -54,3 +54,17 @@ public class JobSummary
     public int TotalExpected { get; set; }
     public DateTime LastScanDate { get; set; }
 }
+
+public class JobPalletInfo
+{
+    public string JobNumber { get; set; }
+    public string PalletName { get; set; }
+    public int SequenceNumber { get; set; }
+    public int Id { get; set; }
+}
+
+public class PartQuantity
+{
+    public string PartId { get; set; }
+    public int Quantity { get; set; }
+}

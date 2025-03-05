@@ -1,7 +1,10 @@
 using ExcelDataReader;
+using Microsoft.AspNetCore.Routing.Template;
 using System.Collections.Concurrent;
 using System.Data;
+using System.Globalization;
 using System.IO;
+using ClosedXML.Excel;
 
 namespace CyrScanDashboard.Services
 {
@@ -11,6 +14,8 @@ namespace CyrScanDashboard.Services
             new ConcurrentDictionary<string, HashSet<string>>();
         private readonly string _excelBasePath = @"P:\DESSINS\DIVERS FAB\MOUAD\Cyramp-Test-XL\";
         private readonly string _tempFolderPath = @"P:\DESSINS\DIVERS FAB\MOUAD\Cyramp-Test-XL\Temp (NE PAS SUPPRIMER)\";
+        private const string OutputFolderPath = @"P:\DESSINS\DIVERS FAB\MOUAD\Cyramp-EMBALLAGE\";
+        private const string TemplatePath = @"P:\DESSINS\DIVERS FAB\MOUAD\Cyramp-Test-XL\Template-Emballage.xlsm";
 
         public ExcelValidationService()
         {
@@ -121,70 +126,6 @@ namespace CyrScanDashboard.Services
                 // Handle other exceptions
                 return (null, 0);
             }
-        }
-
-        private HashSet<string> ProcessExcelFile(FileStream fileStream, string jobNumber)
-        {
-            var jobParts = new HashSet<string>();
-
-            using (var reader = ExcelReaderFactory.CreateReader(fileStream))
-            {
-                var result = reader.AsDataSet();
-                DataTable worksheet = result.Tables["CONTROLE"];
-
-                if (worksheet == null)
-                {
-                    return null;
-                }
-
-                var totalTagsCell = worksheet.Rows[0][10]; // K1
-                int k1Value = Convert.ToInt32(totalTagsCell);
-
-                // If K1 is 0, determine the total by summing values in column D until we hit a 0
-                int totalRows;
-                if (k1Value == 0)
-                {
-                    totalRows = 1; // Start from row 2 (index 1)
-                    while (totalRows < worksheet.Rows.Count)
-                    {
-                        var dValue = worksheet.Rows[totalRows][3]; // D column (index 3)
-                        if (dValue == null || Convert.ToInt32(dValue) == 0)
-                        {
-                            break;
-                        }
-                        totalRows++;
-                    }
-                }
-                else
-                {
-                    totalRows = k1Value;
-                }
-
-                for (int row = 1; row <= totalRows; row++)
-                {
-                    string excelPartId = worksheet.Rows[row][0]?.ToString()?.Trim(); // A column (index 0)
-
-                    // If A column is empty, use C column
-                    if (string.IsNullOrEmpty(excelPartId))
-                    {
-                        string cColumnPartId = worksheet.Rows[row][2]?.ToString()?.Trim(); // C column (index 2)
-                        if (!string.IsNullOrEmpty(cColumnPartId))
-                        {
-                            // Just add the part ID once to the HashSet regardless of quantity
-                            jobParts.Add(cColumnPartId);
-                        }
-                    }
-                    else
-                    {
-                        // Original behavior for when A column has data
-                        jobParts.Add(excelPartId);
-                    }
-                }
-            }
-
-            // Store in cache
-            _jobCache[jobNumber] = jobParts;
-            return jobParts;
         }
 
         public IEnumerable<object> GetExcelJobDetails(string jobNumber)
@@ -541,5 +482,322 @@ namespace CyrScanDashboard.Services
                 }
             }
         }
+
+        public ProjectData GetProjectData(string jobNumber)
+        {
+            try
+            {
+                System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+                string searchPattern = $"{jobNumber}*.xlsm";
+                string[] matchingFiles = Directory.GetFiles(_excelBasePath, searchPattern);
+
+                if (matchingFiles.Length == 0)
+                {
+                    return null;
+                }
+
+                string excelPath = matchingFiles[0];
+                string tempFilePath = null;
+
+                try
+                {
+                    using (var fileStream = File.Open(excelPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        return ProcessProjectData(fileStream);
+                    }
+                }
+                catch (IOException)
+                {
+                    try
+                    {
+                        string fileName = Path.GetFileName(excelPath);
+                        tempFilePath = Path.Combine(_tempFolderPath, $"temp_{Guid.NewGuid()}_{fileName}");
+
+                        File.Copy(excelPath, tempFilePath, true);
+
+                        using (var fileStream = File.Open(tempFilePath, FileMode.Open, FileAccess.Read))
+                        {
+                            return ProcessProjectData(fileStream);
+                        }
+                    }
+                    finally
+                    {
+                        if (tempFilePath != null && File.Exists(tempFilePath))
+                        {
+                            try
+                            {
+                                File.Delete(tempFilePath);
+                            }
+                            catch
+                            {
+                                // Ignore cleanup errors
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private ProjectData ProcessProjectData(FileStream fileStream)
+        {
+            using (var reader = ExcelReaderFactory.CreateReader(fileStream))
+            {
+                var result = reader.AsDataSet();
+                DataTable projetSheet = result.Tables["PROJET"];
+
+                if (projetSheet == null)
+                {
+                    return null;
+                }
+
+                if (projetSheet.Rows[25][1]?.ToString()?.Trim() == "CODE")
+                {
+                    return new ProjectData
+                    {
+                        Client = projetSheet.Rows[0][1]?.ToString()?.Trim(),
+                        Contact = projetSheet.Rows[2][1]?.ToString()?.Trim(),
+                        Projet = projetSheet.Rows[10][1]?.ToString()?.Trim(),
+                        Livraison = projetSheet.Rows[13][1]?.ToString()?.Trim(),
+                        BonCommande = projetSheet.Rows[21][4]?.ToString()?.Trim(),
+                        EcheanceB20 = projetSheet.Rows[19][1]?.ToString()?.Trim(),
+                        EcheanceB21 = projetSheet.Rows[20][1]?.ToString()?.Trim(),
+                        Contenu = projetSheet.Rows[26][4]?.ToString()?.Trim(),
+                        BcClient = projetSheet.Rows[17][1]?.ToString()?.Trim(),
+                        ChargeProjet = projetSheet.Rows[7][1]?.ToString()?.Trim(),
+                        Fini = projetSheet.Rows[21][3]?.ToString()?.Trim()
+                    };
+                } else
+                {
+                    return new ProjectData
+                    {
+                        Client = projetSheet.Rows[0][2]?.ToString()?.Trim(),
+                        Contact = projetSheet.Rows[5][2]?.ToString()?.Trim(),
+                        Projet = projetSheet.Rows[10][2]?.ToString()?.Trim(),
+                        Livraison = projetSheet.Rows[13][1]?.ToString()?.Trim(),
+                        BonCommande = projetSheet.Rows[21][4]?.ToString()?.Trim(),
+                        EcheanceB20 = projetSheet.Rows[19][1]?.ToString()?.Trim(),
+                        EcheanceB21 = projetSheet.Rows[20][1]?.ToString()?.Trim(),
+                        Contenu = projetSheet.Rows[26][4]?.ToString()?.Trim(),
+                        BcClient = projetSheet.Rows[17][1]?.ToString()?.Trim(),
+                        ChargeProjet = projetSheet.Rows[7][1]?.ToString()?.Trim(),
+                        Fini = projetSheet.Rows[21][3]?.ToString()?.Trim()
+                    };
+                }
+                
+            }
+        }
+
+        public List<PartPackagingData> GetPartPackagingDetails(string jobNumber, List<string> partNames)
+        {
+            try
+            {
+                System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+                string searchPattern = $"{jobNumber}*.xlsm";
+                string[] matchingFiles = Directory.GetFiles(_excelBasePath, searchPattern);
+
+                if (matchingFiles.Length == 0)
+                {
+                    return new List<PartPackagingData>();
+                }
+
+                string excelPath = matchingFiles[0];
+                string tempFilePath = null;
+
+                try
+                {
+                    using (var fileStream = File.Open(excelPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        return ProcessPartPackagingDetails(fileStream, partNames);
+                    }
+                }
+                catch (IOException)
+                {
+                    try
+                    {
+                        string fileName = Path.GetFileName(excelPath);
+                        tempFilePath = Path.Combine(_tempFolderPath, $"temp_{Guid.NewGuid()}_{fileName}");
+
+                        File.Copy(excelPath, tempFilePath, true);
+
+                        using (var fileStream = File.Open(tempFilePath, FileMode.Open, FileAccess.Read))
+                        {
+                            return ProcessPartPackagingDetails(fileStream, partNames);
+                        }
+                    }
+                    finally
+                    {
+                        if (tempFilePath != null && File.Exists(tempFilePath))
+                        {
+                            try
+                            {
+                                File.Delete(tempFilePath);
+                            }
+                            catch
+                            {
+                                // Ignore cleanup errors
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                return new List<PartPackagingData>();
+            }
+        }
+
+        private List<PartPackagingData> ProcessPartPackagingDetails(FileStream fileStream, List<string> partNames)
+        {
+            var partDetails = new List<PartPackagingData>();
+
+            using (var reader = ExcelReaderFactory.CreateReader(fileStream))
+            {
+                var result = reader.AsDataSet();
+                DataTable projetSheet = result.Tables["PROJET"];
+
+                if (projetSheet == null)
+                {
+                    return partDetails;
+                }
+
+                foreach (string partName in partNames)
+                {
+                    for (int i = 0; i < projetSheet.Rows.Count; i++)
+                    {
+                        string excelPartName = projetSheet.Rows[i][3]?.ToString()?.Trim(); // Col D
+                        if (excelPartName == partName)
+                        {
+                            string valHauteur = projetSheet.Rows[i][5]?.ToString()?.Trim(); // Col F
+                            string valLargeur = projetSheet.Rows[i][6]?.ToString()?.Trim(); // Col G
+                            string codeMateriel = projetSheet.Rows[i][0]?.ToString()?.Trim(); // Col A
+
+                            // Look up codeMateriel in the M2:M19 range
+                            string valFromMRange = null;
+                            for (int j = 1; j <= 18; j++)
+                            {
+                                if (projetSheet.Rows[j][12]?.ToString()?.Trim() == codeMateriel)
+                                {
+                                    valFromMRange = projetSheet.Rows[j][15]?.ToString()?.Trim(); // Column P is index 15
+                                    break;
+                                }
+                            }
+
+                            partDetails.Add(new PartPackagingData
+                            {
+                                PartName = partName,
+                                Hauteur = valHauteur,
+                                Largeur = valLargeur,
+                                CodeMateriel = codeMateriel,
+                                MassePi2 = valFromMRange
+                            });
+                        }
+                    }
+                }
+            }
+
+            return partDetails;
+        }
+
+        public string CreateEmballageFile(string jobNumber, string paletteName, string palLong, string palLarg,
+            List<PartPackagingData> partDetails, int[] quantities)
+        {
+            var projectData = GetProjectData(jobNumber);
+            if (projectData == null)
+            {
+                throw new Exception("Impossible de trouver les données du projet");
+            }
+
+            string outputFileName = $"{jobNumber} {paletteName} EMBALLAGE.xlsm";
+            string outputPath = Path.Combine(OutputFolderPath, outputFileName);
+
+            using (var workbook = new XLWorkbook(TemplatePath))
+            {
+                var worksheet = workbook.Worksheet(1);
+                int startRow = 11;
+                double masseTotal = 0;
+                int qteTotal = 0;
+
+                for (int i = 0; i < partDetails.Count; i++)
+                {
+                    var detail = partDetails[i];
+                    int qty = quantities[i];
+
+                    worksheet.Cell(startRow, 1).Value = detail.PartName;
+                    worksheet.Cell(startRow, 4).Value = detail.Hauteur;
+                    worksheet.Cell(startRow, 6).Value = detail.Largeur;
+                    worksheet.Cell(startRow, 3).Value = qty;
+                    worksheet.Cell(startRow, 7).Value = CalculSurface(detail.Hauteur, detail.Largeur);
+
+                    masseTotal += (Convert.ToDouble(detail.MassePi2) * qty);
+                    qteTotal += qty;
+                    startRow++;
+                }
+
+                var echeanceValue = string.IsNullOrEmpty(projectData.EcheanceB21)
+                    ? projectData.EcheanceB20
+                    : projectData.EcheanceB21;
+
+                worksheet.Cell("B1").Value = projectData.Client;
+                worksheet.Cell("B2").Value = projectData.Contact;
+                worksheet.Cell("B3").Value = projectData.Projet;
+                worksheet.Cell("B4").Value = projectData.Livraison;
+                worksheet.Cell("B5").Value = projectData.BonCommande;
+                worksheet.Cell("B6").Value = Convert.ToDateTime(echeanceValue).ToString("MM/dd/yyyy");
+                worksheet.Cell("B7").Value = qteTotal + " / " + projectData.Contenu;
+                worksheet.Cell("B8").Value = masseTotal;
+                worksheet.Cell("B9").Value = paletteName;
+                worksheet.Cell("F1").FormulaA1 = $"=\"(\"&{jobNumber}&\")\"";
+                worksheet.Cell("F9").Value = palLong + " X " + palLarg;
+                worksheet.Cell("G3").Value = projectData.BcClient;
+                worksheet.Cell("G4").Value = projectData.ChargeProjet;
+                worksheet.Cell("G8").Value = projectData.Fini;
+
+                workbook.SaveAs(outputPath);
+                return outputPath;
+            }
+        }
+
+        private double CalculSurface(string valHauteur, string valLargeur)
+        {
+            try
+            {
+                double hauteur = Convert.ToDouble(valHauteur, CultureInfo.InvariantCulture);
+                double largeur = Convert.ToDouble(valLargeur, CultureInfo.InvariantCulture);
+                return (hauteur * largeur) / 144;
+            }
+            catch (FormatException)
+            {
+                return 0;
+            }
+        }
     }
+
+    public class ProjectData
+    {
+        public string Client { get; set; }
+        public string Contact { get; set; }
+        public string Projet { get; set; }
+        public string Livraison { get; set; }
+        public string BonCommande { get; set; }
+        public string EcheanceB20 { get; set; }
+        public string EcheanceB21 { get; set; }
+        public string Contenu { get; set; }
+        public string BcClient { get; set; }
+        public string ChargeProjet { get; set; }
+        public string Fini { get; set; }
+    }
+
+    public class PartPackagingData
+    {
+        public string PartName { get; set; }
+        public string Hauteur { get; set; }
+        public string Largeur { get; set; }
+        public string CodeMateriel { get; set; }
+        public string MassePi2 { get; set; }
+    }
+
 }

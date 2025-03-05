@@ -494,6 +494,86 @@ public class DashboardController : ControllerBase
         }
     }
 
+    [HttpGet("packaging/{palletId:int}")]
+    public async Task<IActionResult> CreatePackaging(int palletId, string palLong, string palLarg)
+    {
+        try
+        {
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                await connection.OpenAsync();
+
+                // Get job number and pallet name
+                var jobPalletInfo = await connection.QueryFirstOrDefaultAsync<JobPalletInfo>(
+                    @"SELECT DISTINCT
+                    st.JobNumber,
+                    p.Name AS PalletName,
+                    p.SequenceNumber,
+                    p.Id
+                FROM 
+                    dbo.ScannedTags st
+                JOIN 
+                    dbo.Pallets p ON st.PalletId = p.Id
+                WHERE 
+                    st.PalletId = @PalletId",
+                    new { PalletId = palletId });
+
+                if (jobPalletInfo == null)
+                {
+                    return NotFound(new { message = "Aucune information trouvée pour cette palette" });
+                }
+
+                // Get parts and their quantities
+                var partsQuery = @"
+            SELECT 
+                PartId,
+                COUNT(*) AS Quantity
+            FROM ScannedTags
+            WHERE PalletId = @PalletId
+            GROUP BY PartId
+            ORDER BY Quantity DESC";
+
+                var partQuantities = await connection.QueryAsync<PartQuantity>(partsQuery, new { PalletId = palletId });
+
+                // Get unique part names
+                var partNames = partQuantities.Select(p => p.PartId).ToList();
+
+                // Get part details from Excel
+                var partDetails = _excelValidationService.GetPartPackagingDetails(jobPalletInfo.JobNumber, partNames);
+
+                // Ensure order and quantities match
+                var orderedPartDetails = partNames
+                    .Select(partName => partDetails.FirstOrDefault(p => p.PartName == partName))
+                    .Where(p => p != null)
+                    .ToList();
+
+                var quantities = partQuantities.Select(p => p.Quantity).ToArray();
+
+                // Create packaging file
+                string filePath = _excelValidationService.CreateEmballageFile(
+                    jobPalletInfo.JobNumber,
+                    jobPalletInfo.PalletName,
+                    palLong,
+                    palLarg,
+                    orderedPartDetails,
+                    quantities
+                );
+
+                return Ok(new
+                {
+                    message = "Fichier d'emballage créé avec succès",
+                    filePath = filePath,
+                    jobNumber = jobPalletInfo.JobNumber,
+                    paletteName = jobPalletInfo.PalletName
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = $"Erreur: {ex.Message}" });
+        }
+    }
+
     //Methode pour Ajouter un 0 avant le numero de sequence si le numero est inferieur a 10
     private string FormatQRCode(string qrCode)
     {
@@ -506,5 +586,25 @@ public class DashboardController : ControllerBase
         }
 
         return string.Join("-", parts);
+    }
+
+    private async Task<IEnumerable<(string PartId, int Quantity)>> GetPalletPartsGrouped(int palletId)
+    {
+        using (var connection = new SqlConnection(_connectionString))
+        {
+            var query = @"
+            SELECT 
+                PartId,
+                COUNT(*) AS Quantity
+            FROM ScannedTags
+            WHERE PalletId = @PalletId
+            GROUP BY PartId
+            ORDER BY Quantity DESC";
+
+            return await connection.QueryAsync<(string, int)>(
+                query,
+                new { PalletId = palletId }
+            );
+        }
     }
 }
