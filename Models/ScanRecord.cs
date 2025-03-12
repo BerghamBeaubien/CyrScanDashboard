@@ -19,8 +19,6 @@ public class ScanRequest
 
 public class DeleteScanRequest
 {
-    public string JobNumber { get; set; }
-    public string PartID { get; set; }
     public string QRCode { get; set; }
     public int PalletId { get; set; }
 }

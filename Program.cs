@@ -4,8 +4,12 @@ var builder = WebApplication.CreateBuilder(args);
 // Add this configuration to listen on all interfaces
 builder.WebHost.ConfigureKestrel(serverOptions =>
 {
-    serverOptions.ListenAnyIP(5128); // This makes the API accessible on all network interfaces
+    serverOptions.ListenAnyIP(5128, listenOptions =>
+    {
+        listenOptions.UseHttps("./certificate.pfx", "admin");
+    });
 });
+
 
 // Your existing configuration
 builder.Services.AddControllers();

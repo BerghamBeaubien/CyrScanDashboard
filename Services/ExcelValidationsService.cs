@@ -679,9 +679,9 @@ namespace CyrScanDashboard.Services
                             string valFromMRange = null;
                             for (int j = 1; j <= 18; j++)
                             {
-                                if (projetSheet.Rows[j][12]?.ToString()?.Trim() == codeMateriel)
+                                if (projetSheet.Rows[j][14]?.ToString()?.Trim() == codeMateriel)
                                 {
-                                    valFromMRange = projetSheet.Rows[j][15]?.ToString()?.Trim(); // Column P is index 15
+                                    valFromMRange = projetSheet.Rows[j][17]?.ToString()?.Trim(); // Column R is index 17
                                     break;
                                 }
                             }
@@ -702,8 +702,8 @@ namespace CyrScanDashboard.Services
             return partDetails;
         }
 
-        public string CreateEmballageFile(string jobNumber, string paletteName, string palLong, string palLarg,
-            List<PartPackagingData> partDetails, int[] quantities)
+        public string CreateEmballageFile(string jobNumber, string paletteName, string palLong, string palLarg, string palHaut, string Notes,
+    bool palFinal, List<PartPackagingData> partDetails, int[] quantities)
         {
             var projectData = GetProjectData(jobNumber);
             if (projectData == null)
@@ -712,11 +712,19 @@ namespace CyrScanDashboard.Services
             }
 
             string outputFileName = $"{jobNumber} {paletteName} EMBALLAGE.xlsm";
+            if (palFinal)
+            {
+                outputFileName = $"{jobNumber} {paletteName} EMBALLAGE (FINALE).xlsm";
+            }
             string outputPath = Path.Combine(OutputFolderPath, outputFileName);
+
+            // Clean palette name by removing "PAL"
+            paletteName = paletteName.Replace("PAL", "");
 
             using (var workbook = new XLWorkbook(TemplatePath))
             {
                 var worksheet = workbook.Worksheet(1);
+                worksheet.SheetView.View = XLSheetViewOptions.PageBreakPreview;
                 int startRow = 11;
                 double masseTotal = 0;
                 int qteTotal = 0;
@@ -737,6 +745,23 @@ namespace CyrScanDashboard.Services
                     startRow++;
                 }
 
+                // Set print area
+                worksheet.PageSetup.PrintAreas.Clear();
+                worksheet.PageSetup.PrintAreas.Add("A1:G" + (startRow - 1));
+
+                // Add a thick border around the print area
+                worksheet.Range($"A{startRow}:G{startRow + 2}").Style.Border.OutsideBorder = XLBorderStyleValues.None;
+                worksheet.Range("A1:G" + (startRow-1)).Style.Border.OutsideBorder = XLBorderStyleValues.Thick;
+                worksheet.Range("A1:G" + (startRow-1)).Style.Border.OutsideBorderColor = XLColor.Black;
+
+                // Lock all cells, then unlock the 3 rows after the last data row
+                worksheet.Protect();
+                worksheet.Range("A1:G" + (startRow - 1)).Style.Protection.Locked = true;
+                worksheet.Range($"A{startRow}:G{startRow + 2}").Style.Protection.Locked = false;
+                worksheet.Range($"A{startRow}:G{startRow + 2}").Value = "";
+                worksheet.Cell($"A{startRow}").Value = "Notes:";
+                worksheet.Cell($"B{startRow}").Value = Notes;
+
                 var echeanceValue = string.IsNullOrEmpty(projectData.EcheanceB21)
                     ? projectData.EcheanceB20
                     : projectData.EcheanceB21;
@@ -749,9 +774,9 @@ namespace CyrScanDashboard.Services
                 worksheet.Cell("B6").Value = Convert.ToDateTime(echeanceValue).ToString("MM/dd/yyyy");
                 worksheet.Cell("B7").Value = qteTotal + " / " + projectData.Contenu;
                 worksheet.Cell("B8").Value = masseTotal;
-                worksheet.Cell("B9").Value = paletteName;
+                worksheet.Cell("B9").Value = palFinal ? paletteName + " (FINALE)" : paletteName;
                 worksheet.Cell("F1").FormulaA1 = $"=\"(\"&{jobNumber}&\")\"";
-                worksheet.Cell("F9").Value = palLong + " X " + palLarg;
+                worksheet.Cell("F9").Value = palLong + " X " + palLarg + " X " + palHaut;
                 worksheet.Cell("G3").Value = projectData.BcClient;
                 worksheet.Cell("G4").Value = projectData.ChargeProjet;
                 worksheet.Cell("G8").Value = projectData.Fini;
@@ -760,6 +785,7 @@ namespace CyrScanDashboard.Services
                 return outputPath;
             }
         }
+
 
         private double CalculSurface(string valHauteur, string valLargeur)
         {

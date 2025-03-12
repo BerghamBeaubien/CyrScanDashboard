@@ -1,10 +1,9 @@
 using Microsoft.AspNetCore.Mvc;
-using System.Data.SqlClient;
+using Microsoft.Data.SqlClient;
 using Dapper;
 using CyrScanDashboard.Models;
 using System.Data;
 using CyrScanDashboard.Services;
-using Microsoft.IdentityModel.Tokens;
 
 namespace CyrScanDashboard.Controllers;
 
@@ -12,7 +11,7 @@ namespace CyrScanDashboard.Controllers;
 [Route("api/[controller]")]
 public class DashboardController : ControllerBase
 {
-    private readonly string _connectionString = "Server=192.168.88.55,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;";
+    private readonly string _connectionString = "Server=192.168.88.55,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;TrustServerCertificate=True;";
     private readonly ExcelValidationService _excelValidationService;
 
     public DashboardController(ExcelValidationService excelValidationService)
@@ -303,6 +302,27 @@ public class DashboardController : ControllerBase
         {
             await connection.OpenAsync();
 
+            var palletJobQuery = "SELECT JobNumber FROM Pallets WHERE Id = @PalletId";
+            var palletJobNumber = await connection.QueryFirstOrDefaultAsync<string>(palletJobQuery, new { request.PalletId });
+
+            if (palletJobNumber == null)
+            {
+                return BadRequest(new
+                {
+                    success = false,
+                    message = "Palette introuvable"
+                });
+            }
+
+            if (palletJobNumber != request.JobNumber)
+            {
+                return BadRequest(new
+                {
+                    success = false,
+                    message = "Le numéro de job ne correspond pas à celui de la palette sélectionnée"
+                });
+            }
+
             // Check if QR code already scanned
             var checkQuery = "SELECT COUNT(*) FROM ScannedTags WHERE QRCode = @QRCode";
             var exists = await connection.ExecuteScalarAsync<int>(checkQuery, new { request.QRCode });
@@ -312,7 +332,7 @@ public class DashboardController : ControllerBase
                 return BadRequest(new
                 {
                     success = false,
-                    message = "Ce QR code a déjà été scanné"
+                    message = "Ce Code QR a déjà été scanné"
                 });
             }
 
@@ -342,7 +362,7 @@ public class DashboardController : ControllerBase
             return Ok(new
             {
                 success = true,
-                message = "Scan saved successfully"
+                message = "Scan Réussi"
             });
         }
     }
@@ -356,15 +376,11 @@ public class DashboardController : ControllerBase
 
             var deleteQuery = @"
             DELETE FROM ScannedTags
-            WHERE JobNumber = @JobNumber 
-            AND PartID = @PartID
-            AND QRCode = @QRCode
+            WHERE QRCode = @QRCode
             AND PalletId = @PalletId";
 
             var rowsAffected = await connection.ExecuteAsync(deleteQuery, new
             {
-                request.JobNumber,
-                request.PartID,
                 request.QRCode,
                 request.PalletId
             });
@@ -495,7 +511,7 @@ public class DashboardController : ControllerBase
     }
 
     [HttpGet("packaging/{palletId:int}")]
-    public async Task<IActionResult> CreatePackaging(int palletId, string palLong, string palLarg)
+    public async Task<IActionResult> CreatePackaging(int palletId, string palLong, string palLarg, string palHaut,string Notes, bool palFinal)
     {
         try
         {
@@ -555,6 +571,9 @@ public class DashboardController : ControllerBase
                     jobPalletInfo.PalletName,
                     palLong,
                     palLarg,
+                    palHaut,
+                    Notes,
+                    palFinal,
                     orderedPartDetails,
                     quantities
                 );
