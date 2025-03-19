@@ -270,7 +270,18 @@ public class DashboardController : ControllerBase
     [HttpPost("scan")]
     public async Task<IActionResult> AddScan([FromBody] ScanRequest request)
     {
-        // Validate the pallet ID
+        // Vérifier si l'utilisateur est authentifié
+        int userId = int.Parse(User.FindFirst("UserId")?.Value ?? "0");
+        if (userId == 0)
+        {
+            return Unauthorized(new
+            {
+                success = false,
+                message = "L'utilisateur doit être authentifié pour scanner des pièces"
+            });
+        }
+
+        // Valider l'ID de la palette
         if (request.PalletId <= 0)
         {
             return BadRequest(new
@@ -282,7 +293,7 @@ public class DashboardController : ControllerBase
 
         request.QRCode = FormatQRCode(request.QRCode);
 
-        // Validate the part ID against Excel data
+        // Valider le numéro de pièce par rapport aux données Excel
         var validationResult = _excelValidationService.ValidatePart(
             request.JobNumber,
             request.PartID,
@@ -323,7 +334,7 @@ public class DashboardController : ControllerBase
                 });
             }
 
-            // Check if QR code already scanned
+            // Vérifier si le code QR a déjà été scanné
             var checkQuery = "SELECT COUNT(*) FROM ScannedTags WHERE QRCode = @QRCode";
             var exists = await connection.ExecuteScalarAsync<int>(checkQuery, new { request.QRCode });
 
@@ -336,18 +347,18 @@ public class DashboardController : ControllerBase
                 });
             }
 
-            // Get TotalQuantityJob from Excel
+            // Obtenir TotalQuantityJob depuis Excel
             int totalQuantityJob = validationResult.totalQty;
 
-            // Insert new scan record with TotalQuantityJob
+            // Insérer un nouvel enregistrement de scan avec TotalQuantityJob et l'ID de l'utilisateur
             var insertQuery = @"
-            INSERT INTO ScannedTags (
-                JobNumber, PartID, QRCode, 
-                ScanDate, PalletId, TotalQuantityJob
-            ) VALUES (
-                @JobNumber, @PartID, @QRCode, 
-                @ScanDate, @PalletId, @TotalQuantityJob
-            )";
+        INSERT INTO ScannedTags (
+            JobNumber, PartID, QRCode, 
+            ScanDate, PalletId, TotalQuantityJob, ScannedByUserId
+        ) VALUES (
+            @JobNumber, @PartID, @QRCode, 
+            @ScanDate, @PalletId, @TotalQuantityJob, @UserId
+        )";
 
             await connection.ExecuteAsync(insertQuery, new
             {
@@ -356,7 +367,8 @@ public class DashboardController : ControllerBase
                 request.QRCode,
                 ScanDate = DateTime.Now,
                 request.PalletId,
-                TotalQuantityJob = totalQuantityJob
+                TotalQuantityJob = totalQuantityJob,
+                UserId = userId
             });
 
             return Ok(new
@@ -370,27 +382,104 @@ public class DashboardController : ControllerBase
     [HttpDelete("delete")]
     public async Task<IActionResult> DeleteScan([FromBody] DeleteScanRequest request)
     {
+        // Vérifier si l'utilisateur est authentifié
+        int userId = int.Parse(User.FindFirst("UserId")?.Value ?? "0");
+        if (userId == 0)
+        {
+            return Unauthorized(new
+            {
+                success = false,
+                message = "L'utilisateur doit être authentifié pour supprimer des scans"
+            });
+        }
+
         using (var connection = new SqlConnection(_connectionString))
         {
             await connection.OpenAsync();
 
-            var deleteQuery = @"
-            DELETE FROM ScannedTags
-            WHERE QRCode = @QRCode
-            AND PalletId = @PalletId";
-
-            var rowsAffected = await connection.ExecuteAsync(deleteQuery, new
+            // Commencer une transaction
+            using (var transaction = connection.BeginTransaction())
             {
-                request.QRCode,
-                request.PalletId
-            });
+                try
+                {
+                    // Récupérer les détails du scan avant de le supprimer
+                    var scanQuery = @"
+                SELECT s.*, p.Name as PalletName
+                FROM ScannedTags s
+                LEFT JOIN Pallets p ON s.PalletId = p.Id
+                WHERE s.QRCode = @QRCode AND s.PalletId = @PalletId";
 
-            if (rowsAffected == 0)
-            {
-                return NotFound(new { message = "Scan non trouvé" });
+                    var scan = await connection.QueryFirstOrDefaultAsync(scanQuery, new
+                    {
+                        request.QRCode,
+                        request.PalletId
+                    }, transaction);
+
+                    if (scan == null)
+                    {
+                        return NotFound(new { message = "Scan non trouvé" });
+                    }
+
+                    // Insérer dans la table DeletedScans
+                    var insertDeletedQuery = @"
+                INSERT INTO DeletedScans (
+                    JobNumber, PartID, QRCode, ScanDate, 
+                    DeletedDate, PalletId, TotalQuantityJob, 
+                    DeletedByUserId, PalletName
+                ) VALUES (
+                    @JobNumber, @PartID, @QRCode, @ScanDate,
+                    GETDATE(), @PalletId, @TotalQuantityJob,
+                    @DeletedByUserId, @PalletName
+                )";
+
+                    await connection.ExecuteAsync(insertDeletedQuery, new
+                    {
+                        scan.JobNumber,
+                        scan.PartID,
+                        scan.QRCode,
+                        scan.ScanDate,
+                        scan.PalletId,
+                        scan.TotalQuantityJob,
+                        DeletedByUserId = userId,
+                        scan.PalletName
+                    }, transaction);
+
+                    // Supprimer le scan de la table ScannedTags
+                    var deleteQuery = @"
+                DELETE FROM ScannedTags
+                WHERE QRCode = @QRCode AND PalletId = @PalletId";
+
+                    await connection.ExecuteAsync(deleteQuery, new
+                    {
+                        request.QRCode,
+                        request.PalletId
+                    }, transaction);
+
+                    // Nettoyer les anciens enregistrements si nécessaire (garder seulement les 1000 plus récents)
+                    var cleanupQuery = @"
+                WITH OldestRecords AS (
+                    SELECT Id
+                    FROM DeletedScans
+                    ORDER BY DeletedDate DESC
+                    OFFSET 1000 ROWS
+                )
+                DELETE FROM DeletedScans
+                WHERE Id IN (SELECT Id FROM OldestRecords)";
+
+                    await connection.ExecuteAsync(cleanupQuery, null, transaction);
+
+                    // Valider la transaction
+                    transaction.Commit();
+
+                    return Ok(new { message = "Scan supprimé avec succès" });
+                }
+                catch (Exception ex)
+                {
+                    // Annuler la transaction en cas d'erreur
+                    transaction.Rollback();
+                    return StatusCode(500, new { message = $"Erreur lors de la suppression: {ex.Message}" });
+                }
             }
-
-            return Ok(new { message = "Scan supprimé avec succès" });
         }
     }
 
@@ -590,6 +679,50 @@ public class DashboardController : ControllerBase
         catch (Exception ex)
         {
             return StatusCode(500, new { message = $"Erreur: {ex.Message}" });
+        }
+    }
+
+    [HttpGet("deleted-scans")]
+    public async Task<IActionResult> GetDeletedScans([FromQuery] int page = 1, [FromQuery] int pageSize = 50, [FromQuery] string jobNumber = null)
+    {
+        using (var connection = new SqlConnection(_connectionString))
+        {
+            await connection.OpenAsync();
+
+            // Construire la requête avec filtrage optionnel par jobNumber
+            var whereClause = string.IsNullOrEmpty(jobNumber) ? "" : "WHERE d.JobNumber = @JobNumber";
+
+            var query = $@"
+        SELECT d.*, u.Username as DeletedByUsername
+        FROM DeletedScans d
+        LEFT JOIN Users u ON d.DeletedByUserId = u.Id
+        {whereClause}
+        ORDER BY d.DeletedDate DESC
+        OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+
+            // Calculer l'offset pour la pagination
+            var offset = (page - 1) * pageSize;
+
+            // Exécuter la requête
+            var deletedScans = await connection.QueryAsync(query, new
+            {
+                Offset = offset,
+                PageSize = pageSize,
+                JobNumber = jobNumber
+            });
+
+            // Obtenir le nombre total d'enregistrements pour la pagination
+            var countQuery = $"SELECT COUNT(*) FROM DeletedScans {whereClause}";
+            var totalCount = await connection.ExecuteScalarAsync<int>(countQuery, new { JobNumber = jobNumber });
+
+            return Ok(new
+            {
+                data = deletedScans,
+                totalCount,
+                page,
+                pageSize,
+                totalPages = (int)Math.Ceiling((double)totalCount / pageSize)
+            });
         }
     }
 
