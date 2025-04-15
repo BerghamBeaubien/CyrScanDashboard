@@ -12,10 +12,10 @@ namespace CyrScanDashboard.Services
     {
         private readonly ConcurrentDictionary<string, HashSet<string>> _jobCache =
             new ConcurrentDictionary<string, HashSet<string>>();
-        private readonly string _excelBasePath = @"P:\DESSINS\DIVERS FAB\MOUAD\Cyramp-Test-XL\";
-        private readonly string _tempFolderPath = @"P:\DESSINS\DIVERS FAB\MOUAD\Cyramp-Test-XL\Temp (NE PAS SUPPRIMER)\";
+        private readonly string _excelBasePath = @"P:\CYRAMP\";
+        private readonly string _tempFolderPath = @"P:\CYRAMP\TEMPORAIRE\";
         private const string OutputFolderPath = @"P:\DESSINS\DIVERS FAB\MOUAD\Cyramp-EMBALLAGE\";
-        private const string TemplatePath = @"P:\DESSINS\DIVERS FAB\MOUAD\Cyramp-Test-XL\Template-Emballage.xlsm";
+        private const string TemplatePath = @"P:\DESSINS\DIVERS FAB\MOUAD\Template-Emballage.xlsm";
 
         public ExcelValidationService()
         {

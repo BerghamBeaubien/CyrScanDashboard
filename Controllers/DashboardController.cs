@@ -517,9 +517,11 @@ public class DashboardController : ControllerBase
                 st.PartID,
                 st.QRCode,
                 p.Name AS PalletName,
-                st.ScanDate
+                st.ScanDate,
+                u.Username as ScannedByUser 
             FROM ScannedTags st
             JOIN Pallets p ON st.PalletId = p.Id
+            LEFT JOIN Users u ON st.ScannedByUserId = u.Id
             WHERE st.JobNumber = @JobNumber
             ORDER BY st.ScanDate DESC";
 
@@ -532,7 +534,8 @@ public class DashboardController : ControllerBase
                     g => g.Select(s => new {
                         s.QRCode,
                         s.PalletName,
-                        s.ScanDate
+                        s.ScanDate,
+                        s.ScannedByUser
                     }).ToList()
                 );
 
@@ -608,6 +611,10 @@ public class DashboardController : ControllerBase
             {
                 await connection.OpenAsync();
 
+                if (Notes.Equals("-"))
+                {
+                    Notes = "";
+                }
                 // Get job number and pallet name
                 var jobPalletInfo = await connection.QueryFirstOrDefaultAsync<JobPalletInfo>(
                     @"SELECT DISTINCT
