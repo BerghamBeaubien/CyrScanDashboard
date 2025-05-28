@@ -10,7 +10,7 @@ namespace CyrScanDashboard.Services
 
         public UserService(IConfiguration configuration)
         {
-            _connectionString = "Server=192.168.88.55,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;TrustServerCertificate=True;";
+            _connectionString = "Server=cyrscan-server,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;TrustServerCertificate=True;";
         }
 
         public async Task<User> AuthenticateAsync(string username, string password)

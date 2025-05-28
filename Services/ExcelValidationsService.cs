@@ -5,6 +5,9 @@ using System.Data;
 using System.Globalization;
 using System.IO;
 using ClosedXML.Excel;
+using System.Net.Mail;
+using System.Net;
+using System.Runtime.InteropServices;
 
 namespace CyrScanDashboard.Services
 {
@@ -14,7 +17,7 @@ namespace CyrScanDashboard.Services
             new ConcurrentDictionary<string, HashSet<string>>();
         private readonly string _excelBasePath = @"P:\CYRAMP\";
         private readonly string _tempFolderPath = @"P:\CYRAMP\TEMPORAIRE\";
-        private const string OutputFolderPath = @"P:\DESSINS\DIVERS FAB\MOUAD\Cyramp-EMBALLAGE\";
+        private const string OutputFolderPath = @"P:\Groupe AMP\Feuilles Emballage - CYRSCAN\";
         private const string TemplatePath = @"P:\DESSINS\DIVERS FAB\MOUAD\Template-Emballage.xlsm";
 
         public ExcelValidationService()
@@ -703,7 +706,7 @@ namespace CyrScanDashboard.Services
         }
 
         public string CreateEmballageFile(string jobNumber, string paletteName, string palLong, string palLarg, string palHaut, string Notes,
-    bool palFinal, List<PartPackagingData> partDetails, int[] quantities)
+    bool palFinal, List<PartPackagingData> partDetails, int[] quantities, IFormFile palletImage = null)
         {
             var projectData = GetProjectData(jobNumber);
             if (projectData == null)
@@ -782,10 +785,181 @@ namespace CyrScanDashboard.Services
                 worksheet.Cell("G8").Value = projectData.Fini;
 
                 workbook.SaveAs(outputPath);
-                return outputPath;
+
+                // Save as PDF (Excel Interop API)
+                string pdfFileName = Path.ChangeExtension(outputFileName, ".pdf");
+                string pdfPath = Path.Combine(OutputFolderPath, pdfFileName);
+                string imagePath = "";
+                ExportToPdf(outputPath, pdfPath);
+
+                if (palletImage != null && palletImage.Length > 0)
+                {
+                    string imageFileName = Path.ChangeExtension(outputFileName, ".jpg");
+                    imagePath = Path.Combine(OutputFolderPath, imageFileName);
+                    SavePalletImage(palletImage, imagePath);
+                }
+
+                SendNotificationEmail(jobNumber, pdfPath, projectData.ChargeProjet, palFinal, paletteName, imagePath);
+
+                return pdfPath;
             }
         }
 
+        private void ExportToPdf(string excelPath, string pdfPath)
+        {
+            dynamic excel = null;
+
+            try
+            {
+                // Use late binding to avoid version-specific dependencies
+                excel = Activator.CreateInstance(Type.GetTypeFromProgID("Excel.Application"));
+                excel.Visible = false;
+                excel.DisplayAlerts = false;
+                excel.ScreenUpdating = false;  // Added for performance
+                excel.EnableEvents = false;    // Added for performance
+                excel.AskToUpdateLinks = false; // Avoid prompts
+
+                // Open workbook with optimizations
+                dynamic workbook = excel.Workbooks.Open(excelPath,
+                    UpdateLinks: false,    // Don't update links
+                    ReadOnly: true         // Open read-only for better performance
+                );
+
+                try
+                {
+                    // Export as PDF with minimal options
+                    workbook.ExportAsFixedFormat(0, pdfPath, 0, false, false);
+
+                    // Close workbook immediately after export
+                    workbook.Close(false);
+                }
+                finally
+                {
+                    // Release workbook immediately
+                    if (workbook != null)
+                    {
+                        Marshal.FinalReleaseComObject(workbook);
+                        workbook = null;
+                    }
+                }
+            }
+            finally
+            {
+                // Clean up Excel
+                if (excel != null)
+                {
+                    excel.Quit();
+                    Marshal.FinalReleaseComObject(excel);
+                    excel = null;
+                }
+
+                // Immediate garbage collection
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+        }
+
+        private void SendNotificationEmail(string jobNumber, string pdfPath, string chargeProjet, bool palFinale, string paletteName, string imagePath)
+        {
+            string courrielMolly = "molly.drapeau@cyrell.qc.ca";
+            string courrielExpedition = "expedition@cyrell.qc.ca";
+            string chargeEmail = GetEmailForChargeProjet(chargeProjet);
+
+            var toList = new List<string> { courrielMolly };
+            if (!string.IsNullOrWhiteSpace(chargeEmail))
+                toList.Add(chargeEmail);
+
+
+            var smtp = new SmtpClient
+            {
+                Host = "smtp.gmail.com",
+                Port = 587,
+                EnableSsl = true,
+                Credentials = new NetworkCredential("noreply.cyrscan@gmail.com", "lpye mmgp tggh hcca")
+            };
+
+            using (var message = new MailMessage())
+            {
+                message.From = new MailAddress("noreply.cyrscan@gmail.com", "Système d'emballage automatisé");
+                message.To.Add(courrielExpedition);
+                message.Subject = $"Palette #{paletteName} - Job #{jobNumber}";
+                message.Body = $"Bonjour,\n\nVeuillez trouver ci-joint le document d'emballage pour la palette {paletteName} de la job #{jobNumber}.\n\nCordialement,\nSystème d'emballage automatisé. Ciao Bye Cimer";
+                message.Attachments.Add(new Attachment(pdfPath));
+                if (!string.IsNullOrWhiteSpace(imagePath) && File.Exists(imagePath))
+                {
+                    message.Attachments.Add(new Attachment(imagePath));
+                }
+
+                smtp.Send(message);
+            }
+
+            if (palFinale)
+            {
+                using (var message = new MailMessage())
+                {
+                    message.From = new MailAddress("noreply.cyrscan@gmail.com", "Système d'emballage automatisé");
+                    foreach (var to in toList)
+                        message.To.Add(to);
+
+                    message.Subject = $"Palette finale - Job #{jobNumber}";
+                    message.Body = $"Bonjour,\n\nVeuillez trouver ci-joint le document d'emballage pour la palette finale de la job #{jobNumber}.\n\nCordialement,\nSystème d'emballage automatisé.";
+                    message.Attachments.Add(new Attachment(pdfPath));
+                    if (!string.IsNullOrWhiteSpace(imagePath) && File.Exists(imagePath))
+                    {
+                        message.Attachments.Add(new Attachment(imagePath));
+                    }
+
+                    smtp.Send(message);
+                }
+            }
+        }
+
+        private string GetEmailForChargeProjet(string chargeProjet)
+        {
+            // Mapping of projet managers to their email addresses
+            Dictionary<string, string> emailMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "Abdelalim", "abdelalim.elhajri@cyrell.qc.ca" },
+                    { "Bhupinder", "bhupinder.mahey@cyrell.qc.ca" },
+                    { "Cassie Giguère", "cassie.giguere@cyrell.qc.ca" },
+                    { "Amélie Poirier-Borduas", "amelie.poirier-borduas@cyrell.qc.ca" },
+                    { "David Théroux", "david.theroux@cyrell.qc.ca" },
+                    { "Emeric", "emeric.buchen@cyrell.qc.ca" },
+                    { "François Audy", "francois.audy@cyrell.qc.ca" },
+                    { "Gabriel", "gabriel.borduas@cyrell.qc.ca" },
+                    { "Hoàng T.", "vuhoang.tran@cyrell.qc.ca" },
+                    { "J-F Urbain", "jean-francois_urbain@cyrell.qc.ca" },
+                    { "Jose", "Jose.Lobato@cyrell.qc.ca" },
+                    { "Meriem", "meriem.bouslimi@cyrell.qc.ca" },
+                    { "Mouad Khalladi", "mouad.khalladi@cyrell.qc.ca" },
+                    { "Pierre Boulanger", "pierre.boulanger@cyrell.qc.ca" }
+                };
+
+            if (emailMappings.TryGetValue(chargeProjet, out string email))
+            {
+                return email;
+            }
+
+            return null; // Return null if no specific email is found
+        }
+
+        private void SavePalletImage(IFormFile imageFile, string imagePath)
+        {
+            try
+            {
+                // Save the image
+                using (var stream = new FileStream(imagePath, FileMode.Create))
+                {
+                    imageFile.CopyTo(stream);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log the error but don't fail the entire operation
+                // You might want to use your logging framework here
+                Console.WriteLine($"Error saving image: {ex.Message}");
+            }
+        }
 
         private double CalculSurface(string valHauteur, string valLargeur)
         {
@@ -824,6 +998,17 @@ namespace CyrScanDashboard.Services
         public string Largeur { get; set; }
         public string CodeMateriel { get; set; }
         public string MassePi2 { get; set; }
+    }
+
+    // Request model for the POST endpoint
+    public class PackagingRequest
+    {
+        public string PalLong { get; set; }
+        public string PalLarg { get; set; }
+        public string PalHaut { get; set; }
+        public string Notes { get; set; }
+        public bool PalFinal { get; set; }
+        public IFormFile PalletImage { get; set; }
     }
 
 }

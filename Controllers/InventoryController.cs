@@ -14,7 +14,7 @@ namespace CyrScanDashboard.Controllers
     [Route("api/[controller]")]
     public class InventoryController : ControllerBase
     {
-        private readonly string _connectionString = "Server=192.168.88.55,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;TrustServerCertificate=True;";
+        private readonly string _connectionString = "Server=cyrscan-server,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;TrustServerCertificate=True;";
 
         // GET: api/Inventory/Materials
         [HttpGet("Materials")]

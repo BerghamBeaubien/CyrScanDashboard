@@ -11,7 +11,7 @@ namespace CyrScanDashboard.Controllers;
 [Route("api/[controller]")]
 public class DashboardController : ControllerBase
 {
-    private readonly string _connectionString = "Server=192.168.88.55,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;TrustServerCertificate=True;";
+    private readonly string _connectionString = "Server=cyrscan-server,1433;Database=CyrScanDB;User Id=Serveur-CyrScan;Password=admin;TrustServerCertificate=True;";
     private readonly ExcelValidationService _excelValidationService;
 
     public DashboardController(ExcelValidationService excelValidationService)
@@ -602,8 +602,14 @@ public class DashboardController : ControllerBase
         }
     }
 
-    [HttpGet("packaging/{palletId:int}")]
-    public async Task<IActionResult> CreatePackaging(int palletId, string palLong, string palLarg, string palHaut,string Notes, bool palFinal)
+    private async Task<IActionResult> CreatePackagingCommon(
+    int palletId,
+    string palLong,
+    string palLarg,
+    string palHaut,
+    string notes,
+    bool palFinal,
+    IFormFile palletImage = null)
     {
         try
         {
@@ -611,10 +617,11 @@ public class DashboardController : ControllerBase
             {
                 await connection.OpenAsync();
 
-                if (Notes.Equals("-"))
+                if (notes.Equals("-"))
                 {
-                    Notes = "";
+                    notes = "";
                 }
+
                 // Get job number and pallet name
                 var jobPalletInfo = await connection.QueryFirstOrDefaultAsync<JobPalletInfo>(
                     @"SELECT DISTINCT
@@ -637,13 +644,13 @@ public class DashboardController : ControllerBase
 
                 // Get parts and their quantities
                 var partsQuery = @"
-            SELECT 
-                PartId,
-                COUNT(*) AS Quantity
-            FROM ScannedTags
-            WHERE PalletId = @PalletId
-            GROUP BY PartId
-            ORDER BY Quantity DESC";
+                SELECT 
+                    PartId,
+                    COUNT(*) AS Quantity
+                FROM ScannedTags
+                WHERE PalletId = @PalletId
+                GROUP BY PartId
+                ORDER BY Quantity DESC";
 
                 var partQuantities = await connection.QueryAsync<PartQuantity>(partsQuery, new { PalletId = palletId });
 
@@ -655,7 +662,7 @@ public class DashboardController : ControllerBase
 
                 // Ensure order and quantities match
                 var orderedPartDetails = partNames
-                    .Select(partName => partDetails.FirstOrDefault(p => p.PartName == partName))
+                    .Select(partName => partDetails.FirstOrDefault(p => p.PartName.Equals(partName, StringComparison.OrdinalIgnoreCase)))
                     .Where(p => p != null)
                     .ToList();
 
@@ -668,10 +675,11 @@ public class DashboardController : ControllerBase
                     palLong,
                     palLarg,
                     palHaut,
-                    Notes,
+                    notes,
                     palFinal,
                     orderedPartDetails,
-                    quantities
+                    quantities,
+                    palletImage
                 );
 
                 return Ok(new
@@ -689,6 +697,24 @@ public class DashboardController : ControllerBase
         }
     }
 
+    [HttpGet("packaging/{palletId:int}")]
+    public async Task<IActionResult> CreatePackaging(int palletId, string palLong, string palLarg, string palHaut, string Notes, bool palFinal)
+    {
+        return await CreatePackagingCommon(palletId, palLong, palLarg, palHaut, Notes, palFinal);
+    }
+
+    [HttpPost("packaging/{palletId:int}")]
+    public async Task<IActionResult> CreatePackagingWithImage(int palletId, [FromForm] PackagingRequest request)
+    {
+        return await CreatePackagingCommon(
+            palletId,
+            request.PalLong,
+            request.PalLarg,
+            request.PalHaut,
+            request.Notes,
+            request.PalFinal,
+            request.PalletImage);
+    }
     [HttpGet("deleted-scans")]
     public async Task<IActionResult> GetDeletedScans([FromQuery] int page = 1, [FromQuery] int pageSize = 50, [FromQuery] string jobNumber = null)
     {
