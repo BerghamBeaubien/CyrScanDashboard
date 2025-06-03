@@ -564,30 +564,32 @@ namespace CyrScanDashboard.Services
                         Client = projetSheet.Rows[0][1]?.ToString()?.Trim(),
                         Contact = projetSheet.Rows[2][1]?.ToString()?.Trim(),
                         Projet = projetSheet.Rows[10][1]?.ToString()?.Trim(),
-                        Livraison = projetSheet.Rows[13][1]?.ToString()?.Trim(),
-                        BonCommande = projetSheet.Rows[21][4]?.ToString()?.Trim(),
+                        Traitement = projetSheet.Rows[13][1]?.ToString()?.Trim(),
+                        AdresseLivraison = projetSheet.Rows[17][3]?.ToString()?.Trim(),
                         EcheanceB20 = projetSheet.Rows[19][1]?.ToString()?.Trim(),
                         EcheanceB21 = projetSheet.Rows[20][1]?.ToString()?.Trim(),
                         Contenu = projetSheet.Rows[26][4]?.ToString()?.Trim(),
                         BcClient = projetSheet.Rows[17][1]?.ToString()?.Trim(),
                         ChargeProjet = projetSheet.Rows[7][1]?.ToString()?.Trim(),
-                        Fini = projetSheet.Rows[21][3]?.ToString()?.Trim()
+                        Fini = projetSheet.Rows[21][3]?.ToString()?.Trim(),
+                        ContactLivraison = projetSheet.Rows[18][3]?.ToString()?.Trim()
                     };
                 } else
                 {
                     return new ProjectData
                     {
                         Client = projetSheet.Rows[0][2]?.ToString()?.Trim(),
-                        Contact = projetSheet.Rows[5][2]?.ToString()?.Trim(),
+                        Contact = projetSheet.Rows[2][2]?.ToString()?.Trim(),
                         Projet = projetSheet.Rows[10][2]?.ToString()?.Trim(),
-                        Livraison = projetSheet.Rows[13][1]?.ToString()?.Trim(),
-                        BonCommande = projetSheet.Rows[21][4]?.ToString()?.Trim(),
+                        Traitement = projetSheet.Rows[13][1]?.ToString()?.Trim(),
+                        AdresseLivraison = projetSheet.Rows[17][3]?.ToString()?.Trim(),
                         EcheanceB20 = projetSheet.Rows[19][1]?.ToString()?.Trim(),
                         EcheanceB21 = projetSheet.Rows[20][1]?.ToString()?.Trim(),
                         Contenu = projetSheet.Rows[26][4]?.ToString()?.Trim(),
                         BcClient = projetSheet.Rows[17][1]?.ToString()?.Trim(),
                         ChargeProjet = projetSheet.Rows[7][1]?.ToString()?.Trim(),
-                        Fini = projetSheet.Rows[21][3]?.ToString()?.Trim()
+                        Fini = projetSheet.Rows[21][3]?.ToString()?.Trim(),
+                        ContactLivraison = projetSheet.Rows[21][4]?.ToString()?.Trim()
                     };
                 }
                 
@@ -732,30 +734,42 @@ namespace CyrScanDashboard.Services
                 double masseTotal = 0;
                 int qteTotal = 0;
 
-                for (int i = 0; i < partDetails.Count; i++)
+                for(int i = 0; i < partDetails.Count; i++)
                 {
                     var detail = partDetails[i];
                     int qty = quantities[i];
+                    double surface = CalculSurface(detail.Hauteur, detail.Largeur);
 
                     worksheet.Cell(startRow, 1).Value = detail.PartName;
                     worksheet.Cell(startRow, 4).Value = detail.Hauteur;
                     worksheet.Cell(startRow, 6).Value = detail.Largeur;
                     worksheet.Cell(startRow, 3).Value = qty;
-                    worksheet.Cell(startRow, 7).Value = CalculSurface(detail.Hauteur, detail.Largeur);
+                    worksheet.Cell(startRow, 7).Value = surface;
 
-                    masseTotal += (Convert.ToDouble(detail.MassePi2) * qty);
+                    masseTotal += (Convert.ToDouble(detail.MassePi2) * qty * surface);
                     qteTotal += qty;
                     startRow++;
                 }
 
-                // Set print area
-                worksheet.PageSetup.PrintAreas.Clear();
-                worksheet.PageSetup.PrintAreas.Add("A1:G" + (startRow - 1));
-
                 // Add a thick border around the print area
                 worksheet.Range($"A{startRow}:G{startRow + 2}").Style.Border.OutsideBorder = XLBorderStyleValues.None;
-                worksheet.Range("A1:G" + (startRow-1)).Style.Border.OutsideBorder = XLBorderStyleValues.Thick;
-                worksheet.Range("A1:G" + (startRow-1)).Style.Border.OutsideBorderColor = XLColor.Black;
+                worksheet.Range("A1:G" + (startRow - 1)).Style.Border.OutsideBorder = XLBorderStyleValues.Thick;
+                worksheet.Range("A1:G" + (startRow - 1)).Style.Border.OutsideBorderColor = XLColor.Black;
+
+                // Set print area
+                worksheet.PageSetup.PrintAreas.Clear();
+
+                if (Notes != null && Notes.Length > 0)
+                {
+                    worksheet.PageSetup.PrintAreas.Add($"A1:G{startRow + 1}");
+                    worksheet.Range($"A{startRow}:G{startRow + 1}").Style.Border.OutsideBorder = XLBorderStyleValues.Thick;
+                    worksheet.Range($"A{startRow}:G{startRow + 1}").Style.Border.InsideBorder = XLBorderStyleValues.None;
+                    worksheet.Range($"A{startRow}:G{startRow + 1}").Style.Border.OutsideBorderColor = XLColor.Black;
+                }
+                else
+                {
+                    worksheet.PageSetup.PrintAreas.Add("A1:G" + (startRow - 1));
+                }
 
                 // Lock all cells, then unlock the 3 rows after the last data row
                 worksheet.Protect();
@@ -763,6 +777,13 @@ namespace CyrScanDashboard.Services
                 worksheet.Range($"A{startRow}:G{startRow + 2}").Style.Protection.Locked = false;
                 worksheet.Range($"A{startRow}:G{startRow + 2}").Value = "";
                 worksheet.Cell($"A{startRow}").Value = "Notes:";
+                worksheet.Cell($"A{startRow}").Style.Font.Bold = true;
+                var mergeRange = worksheet.Range($"B{startRow}:G{startRow + 1}");
+                mergeRange.Merge();
+                mergeRange.Style.Fill.BackgroundColor = XLColor.Yellow;
+                mergeRange.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+                mergeRange.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+                mergeRange.Style.Alignment.WrapText = true;
                 worksheet.Cell($"B{startRow}").Value = Notes;
 
                 var echeanceValue = string.IsNullOrEmpty(projectData.EcheanceB21)
@@ -772,11 +793,13 @@ namespace CyrScanDashboard.Services
                 worksheet.Cell("B1").Value = projectData.Client;
                 worksheet.Cell("B2").Value = projectData.Contact;
                 worksheet.Cell("B3").Value = projectData.Projet;
-                worksheet.Cell("B4").Value = projectData.Livraison;
-                worksheet.Cell("B5").Value = projectData.BonCommande;
+                worksheet.Cell("B4").Value = projectData.Traitement;
+                worksheet.Cell("B5").Value = string.IsNullOrEmpty(projectData.AdresseLivraison)
+                    ? projectData.ContactLivraison
+                    : projectData.AdresseLivraison;
                 worksheet.Cell("B6").Value = Convert.ToDateTime(echeanceValue).ToString("MM/dd/yyyy");
                 worksheet.Cell("B7").Value = qteTotal + " / " + projectData.Contenu;
-                worksheet.Cell("B8").Value = masseTotal;
+                worksheet.Cell("B8").Value = Math.Round(masseTotal, 2);
                 worksheet.Cell("B9").Value = palFinal ? paletteName + " (FINALE)" : paletteName;
                 worksheet.Cell("F1").FormulaA1 = $"=\"(\"&{jobNumber}&\")\"";
                 worksheet.Cell("F9").Value = palLong + " X " + palLarg + " X " + palHaut;
@@ -981,14 +1004,15 @@ namespace CyrScanDashboard.Services
         public string Client { get; set; }
         public string Contact { get; set; }
         public string Projet { get; set; }
-        public string Livraison { get; set; }
-        public string BonCommande { get; set; }
+        public string Traitement { get; set; }
+        public string ContactLivraison { get; set; }
         public string EcheanceB20 { get; set; }
         public string EcheanceB21 { get; set; }
         public string Contenu { get; set; }
         public string BcClient { get; set; }
         public string ChargeProjet { get; set; }
         public string Fini { get; set; }
+        public string AdresseLivraison { get; set; }
     }
 
     public class PartPackagingData
