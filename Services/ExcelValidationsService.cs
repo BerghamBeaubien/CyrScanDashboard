@@ -1,13 +1,14 @@
-using ExcelDataReader;
-using Microsoft.AspNetCore.Routing.Template;
 using System.Collections.Concurrent;
 using System.Data;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using ClosedXML.Excel;
-using System.Net.Mail;
 using System.Net;
+using System.Net.Mail;
 using System.Runtime.InteropServices;
+using ClosedXML.Excel;
+using ExcelDataReader;
+using Microsoft.AspNetCore.Routing.Template;
 
 namespace CyrScanDashboard.Services
 {
@@ -16,8 +17,9 @@ namespace CyrScanDashboard.Services
         private readonly ConcurrentDictionary<string, HashSet<string>> _jobCache =
             new ConcurrentDictionary<string, HashSet<string>>();
         private readonly string _excelBasePath = @"P:\CYRAMP\";
+        private readonly string _excelExtendedPath = @"P:\CYRAMP\TERMINE\";
         private readonly string _tempFolderPath = @"P:\CYRAMP\TEMPORAIRE\";
-        private const string OutputFolderPath = @"P:\Groupe AMP\Feuilles Emballage - CYRSCAN\";
+        private const string OutputBasePath = @"P:\Groupe AMP\Feuilles Emballage - CYRSCAN\";
         private const string TemplatePath = @"P:\DESSINS\DIVERS FAB\MOUAD\Template-Emballage.xlsm";
 
         public ExcelValidationService()
@@ -73,7 +75,12 @@ namespace CyrScanDashboard.Services
 
             if (matchingFiles.Length == 0)
             {
-                return (null, 0);
+                matchingFiles = Directory.GetFiles(_excelExtendedPath, searchPattern);
+
+                if (matchingFiles.Length == 0)
+                {
+                    return (null, 0); // Still not found
+                }
             }
 
             string excelPath = matchingFiles[0];
@@ -141,7 +148,13 @@ namespace CyrScanDashboard.Services
 
                 if (matchingFiles.Length == 0)
                 {
-                    return new List<object>();
+                    matchingFiles = Directory.GetFiles(_excelExtendedPath, searchPattern);
+
+                    if (matchingFiles.Length == 0)
+                    {
+                        return new List<object>(); // Still not found
+                    }
+
                 }
 
                 string excelPath = matchingFiles[0];
@@ -381,7 +394,7 @@ namespace CyrScanDashboard.Services
             return (jobParts, totalQty);
         }
 
-        private int CalculateTotalQuantity(string jobNumber)
+        public int CalculateTotalQuantity(string jobNumber)
         {
             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
             string searchPattern = $"{jobNumber}*.xlsm";
@@ -496,7 +509,12 @@ namespace CyrScanDashboard.Services
 
                 if (matchingFiles.Length == 0)
                 {
-                    return null;
+                    matchingFiles = Directory.GetFiles(_excelExtendedPath, searchPattern);
+
+                    if (matchingFiles.Length == 0)
+                    {
+                        return (null); // Still not found
+                    }
                 }
 
                 string excelPath = matchingFiles[0];
@@ -606,7 +624,12 @@ namespace CyrScanDashboard.Services
 
                 if (matchingFiles.Length == 0)
                 {
-                    return new List<PartPackagingData>();
+                    matchingFiles = Directory.GetFiles(_excelExtendedPath, searchPattern);
+
+                    if (matchingFiles.Length == 0)
+                    {
+                        return new List<PartPackagingData>();
+                    }
                 }
 
                 string excelPath = matchingFiles[0];
@@ -707,7 +730,7 @@ namespace CyrScanDashboard.Services
             return partDetails;
         }
 
-        public string CreateEmballageFile(string jobNumber, string paletteName, string palLong, string palLarg, string palHaut, string Notes,
+        public string[] CreateEmballageFile(string jobNumber, string paletteName, string palLong, string palLarg, string palHaut, string Notes,
     bool palFinal, List<PartPackagingData> partDetails, int[] quantities, IFormFile palletImage = null)
         {
             var projectData = GetProjectData(jobNumber);
@@ -715,13 +738,23 @@ namespace CyrScanDashboard.Services
             {
                 throw new Exception("Impossible de trouver les données du projet");
             }
+            Console.WriteLine("Recuperation des données du projet réussie");
+
+            // Create job-specific folder path
+            string jobFolderPath = Path.Combine(OutputBasePath, jobNumber);
+
+            // Ensure the job folder exists
+            if (!Directory.Exists(jobFolderPath))
+            {
+                Directory.CreateDirectory(jobFolderPath);
+            }
 
             string outputFileName = $"{jobNumber} {paletteName} EMBALLAGE.xlsm";
             if (palFinal)
             {
                 outputFileName = $"{jobNumber} {paletteName} EMBALLAGE (FINALE).xlsm";
             }
-            string outputPath = Path.Combine(OutputFolderPath, outputFileName);
+            string outputPath = Path.Combine(jobFolderPath, outputFileName);
 
             // Clean palette name by removing "PAL"
             paletteName = paletteName.Replace("PAL", "");
@@ -741,10 +774,17 @@ namespace CyrScanDashboard.Services
                     double surface = CalculSurface(detail.Hauteur, detail.Largeur);
 
                     worksheet.Cell(startRow, 1).Value = detail.PartName;
-                    worksheet.Cell(startRow, 4).Value = detail.Hauteur;
-                    worksheet.Cell(startRow, 6).Value = detail.Largeur;
                     worksheet.Cell(startRow, 3).Value = qty;
                     worksheet.Cell(startRow, 7).Value = surface;
+
+                    //Arrondissement de Hauteur et largeur à 3 décimales
+                    if (double.TryParse(detail.Hauteur, NumberStyles.Any, CultureInfo.InvariantCulture, out double hauteur))
+                        worksheet.Cell(startRow, 4).Value = hauteur.ToString("F3", CultureInfo.InvariantCulture);
+                    else worksheet.Cell(startRow, 4).Value = detail.Hauteur;
+
+                    if (double.TryParse(detail.Largeur, NumberStyles.Any, CultureInfo.InvariantCulture, out double largeur))
+                        worksheet.Cell(startRow, 6).Value = largeur.ToString("F3", CultureInfo.InvariantCulture);
+                    else worksheet.Cell(startRow, 6).Value = detail.Largeur;
 
                     masseTotal += (Convert.ToDouble(detail.MassePi2) * qty * surface);
                     qteTotal += qty;
@@ -806,25 +846,30 @@ namespace CyrScanDashboard.Services
                 worksheet.Cell("G3").Value = projectData.BcClient;
                 worksheet.Cell("G4").Value = projectData.ChargeProjet;
                 worksheet.Cell("G8").Value = projectData.Fini;
+                Console.WriteLine("Remplissage des données de la feuille d'emballage reussi");
 
                 workbook.SaveAs(outputPath);
 
                 // Save as PDF (Excel Interop API)
                 string pdfFileName = Path.ChangeExtension(outputFileName, ".pdf");
-                string pdfPath = Path.Combine(OutputFolderPath, pdfFileName);
+                string pdfPath = Path.Combine(jobFolderPath, pdfFileName);
                 string imagePath = "";
                 ExportToPdf(outputPath, pdfPath);
+                Console.WriteLine("Exportation vers PDF réussie");
 
                 if (palletImage != null && palletImage.Length > 0)
                 {
                     string imageFileName = Path.ChangeExtension(outputFileName, ".jpg");
-                    imagePath = Path.Combine(OutputFolderPath, imageFileName);
+                    imagePath = Path.Combine(jobFolderPath, imageFileName);
                     SavePalletImage(palletImage, imagePath);
+                    Console.WriteLine("Image de la palette sauvegardée avec succès");
                 }
-
+                Console.WriteLine("Envoi de l'email de notification");
                 SendNotificationEmail(jobNumber, pdfPath, projectData.ChargeProjet, palFinal, paletteName, imagePath);
+                Console.WriteLine("Email de notification envoyé avec succès");
+                string[] strings = { pdfPath, imagePath };
 
-                return pdfPath;
+                return strings;
             }
         }
 
@@ -996,6 +1041,76 @@ namespace CyrScanDashboard.Services
             {
                 return 0;
             }
+        }
+
+        public async Task<bool> PrintPdfDocument(string pdfPath, string printerName)
+        {
+            try
+            {
+                if (!File.Exists(pdfPath))
+                {
+                    Console.WriteLine($"Fichier PDF non trouvé: {pdfPath}");
+                    return false;
+                }
+
+                Console.WriteLine($"Tentative d'impression du fichier PDF: {pdfPath} sur l'imprimante: {printerName}");
+                // Method 1: Try using Adobe Reader or default PDF reader
+                bool success = await TryPrintWithSumatraPDF(pdfPath, printerName);
+
+                return success;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Erreur lors de l'impression: {ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task<bool> TryPrintWithSumatraPDF(string pdfPath, string printerName)
+        {
+            try
+            {
+                // Common paths where SumatraPDF might be installed
+                var sumatraPaths = new[]
+                {
+            @"C:\Program Files\SumatraPDF\SumatraPDF.exe",
+            @"C:\Program Files (x86)\SumatraPDF\SumatraPDF.exe",
+            @"C:\Users\Public\SumatraPDF\SumatraPDF.exe"
+        };
+
+                string sumatraPath = sumatraPaths.FirstOrDefault(File.Exists);
+
+                if (string.IsNullOrEmpty(sumatraPath))
+                {
+                    Console.WriteLine("SumatraPDF non trouvé");
+                    return false;
+                }
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = sumatraPath,
+                    Arguments = $"-print-to \"{printerName}\" -silent \"{pdfPath}\"",
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+
+                using (var process = Process.Start(startInfo))
+                {
+                    if (process != null)
+                    {
+                        await Task.Run(() => process.WaitForExit(20000)); // 20 second timeout
+                        Console.WriteLine("Impression envoyée via SumatraPDF");
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Échec de l'impression avec SumatraPDF: {ex.Message}");
+            }
+
+            return false;
         }
     }
 

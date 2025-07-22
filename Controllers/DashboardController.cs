@@ -4,6 +4,7 @@ using Dapper;
 using CyrScanDashboard.Models;
 using System.Data;
 using CyrScanDashboard.Services;
+using System.Drawing.Printing;
 
 namespace CyrScanDashboard.Controllers;
 
@@ -137,7 +138,7 @@ public class DashboardController : ControllerBase
 
             // Get all pallets for this job
             var palletsQuery = @"
-            SELECT Id, JobNumber, Name, CreatedDate, SequenceNumber
+            SELECT Id, JobNumber, Name, CreatedDate, SequenceNumber, hasPackagingBeenGenerated, packagingImagePath, packagingPdfPath
             FROM Pallets
             WHERE JobNumber = @JobNumber
             ORDER BY SequenceNumber";
@@ -669,7 +670,7 @@ public class DashboardController : ControllerBase
                 var quantities = partQuantities.Select(p => p.Quantity).ToArray();
 
                 // Create packaging file
-                string filePath = _excelValidationService.CreateEmballageFile(
+                string[] filePaths = _excelValidationService.CreateEmballageFile(
                     jobPalletInfo.JobNumber,
                     jobPalletInfo.PalletName,
                     palLong,
@@ -682,10 +683,35 @@ public class DashboardController : ControllerBase
                     palletImage
                 );
 
+                var rowsAffected = 0;
+                if (filePaths[1] == null)
+                {
+                    var updateQuery = @"
+                    UPDATE Pallets
+                    SET HasPackagingBeenGenerated = 1,
+                        PackagingPdfPath = @PdfPath
+                    WHERE Id = @Id"
+                    ;
+
+                    rowsAffected = await connection.ExecuteAsync(updateQuery, new { Id = palletId, PdfPath = filePaths[0] });
+                }
+                else
+                {
+                    var updateQuery = @"
+                    UPDATE Pallets
+                    SET HasPackagingBeenGenerated = 1,
+                        PackagingImagePath = @ImagePath,
+                        PackagingPdfPath = @PdfPath
+                    WHERE Id = @Id"
+                    ;
+
+                    rowsAffected = await connection.ExecuteAsync(updateQuery, new { Id = palletId, ImagePath = filePaths[1], PdfPath = filePaths[0] });
+                }
+
                 return Ok(new
                 {
                     message = "Fichier d'emballage créé avec succès",
-                    filePath = filePath,
+                    filePath = filePaths[0],
                     jobNumber = jobPalletInfo.JobNumber,
                     paletteName = jobPalletInfo.PalletName
                 });
@@ -715,6 +741,31 @@ public class DashboardController : ControllerBase
             request.PalFinal,
             request.PalletImage);
     }
+
+    [HttpPut("pallets/packaging/{id}")]
+    public async Task<IActionResult> UnlocklPallet(int id)
+    {
+        try
+        {
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                await connection.OpenAsync();
+                var updateQuery = @"
+            UPDATE Pallets
+            SET hasPackagingBeenGenerated = 0
+            WHERE Id = @Id";
+                var rowsAffected = await connection.ExecuteAsync(updateQuery, new { Id = id });
+                if (rowsAffected == 0)
+                    return NotFound("Palette non trouvée");
+                return Ok(new { message = "Palette Débloquée avec succès" });
+            }
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = $"Erreur: {ex.Message}" });
+        }
+    }
+
     [HttpGet("deleted-scans")]
     public async Task<IActionResult> GetDeletedScans([FromQuery] int page = 1, [FromQuery] int pageSize = 50, [FromQuery] string jobNumber = null)
     {
@@ -758,6 +809,204 @@ public class DashboardController : ControllerBase
             });
         }
     }
+
+    [HttpPut("recompute-total/{jobNumber}")]
+    public async Task<IActionResult> RecomputeTotalQuantityJob(string jobNumber)
+    {
+        try
+        {
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                await connection.OpenAsync();
+
+                // Get the current TotalQuantityJob value
+                var currentValueQuery = @"
+                SELECT TOP 1 TotalQuantityJob
+                FROM ScannedTags
+                WHERE JobNumber = @JobNumber";
+
+                var currentTotalQty = await connection.QueryFirstOrDefaultAsync<int?>(currentValueQuery, new { JobNumber = jobNumber });
+
+                if (currentTotalQty == null)
+                    return NotFound("Aucune ligne trouvée pour ce numéro de travail");
+
+                int totalQuantityJob = _excelValidationService.CalculateTotalQuantity(jobNumber);
+                Console.WriteLine($"Total Quantity Job for {jobNumber}: {totalQuantityJob}");
+
+                // Check if the value actually changed
+                if (currentTotalQty == totalQuantityJob)
+                {
+                    return Ok(new
+                    {
+                        message = "Quantité d'étiquettes inchangé - la valeur était déjà correcte",
+                        currentValue = totalQuantityJob,
+                        changed = false
+                    });
+                }
+
+                // Update all rows with the same JobNumber
+                var updateQuery = @"
+                UPDATE ScannedTags
+                SET TotalQuantityJob = @TotalQtyJob
+                WHERE JobNumber = @JobNumber";
+
+                var rowsAffected = await connection.ExecuteAsync(updateQuery, new
+                {
+                    TotalQtyJob = totalQuantityJob,
+                    JobNumber = jobNumber
+                });
+
+                return Ok(new
+                {
+                    message = "La quantité des étiquettes a été recalculé avec succès",
+                    rowsUpdated = rowsAffected,
+                    previousValue = currentTotalQty,
+                    newTotalQuantityJob = totalQuantityJob,
+                    changed = true
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = $"Erreur: {ex.Message}" });
+        }
+    }
+
+    [HttpGet("printers")]
+    public IActionResult GetAvailablePrinters()
+    {
+        try
+        {
+            var printers = new List<object>();
+
+            // Liste des imprimantes à ignorer
+            var excludedPrinters = new List<string>
+        {
+            "Microsoft Print to PDF",
+            "Fax",
+            "OneNote",
+            "XPS Document Writer"
+        };
+
+            // Récupérer le nom de l'imprimante par défaut
+            var defaultPrinterName = new PrinterSettings().PrinterName;
+
+            foreach (string printerName in PrinterSettings.InstalledPrinters)
+            {
+                // Si l'imprimante est dans la liste des exclus, on saute
+                if (excludedPrinters.Any(excluded => printerName.Contains(excluded, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                printers.Add(new
+                {
+                    name = printerName,
+                    displayName = printerName,
+                    isDefault = printerName == defaultPrinterName
+                });
+            }
+
+            return Ok(printers);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = $"Erreur lors de la récupération des imprimantes: {ex.Message}" });
+        }
+    }
+
+    [HttpPost("print")]
+    public async Task<IActionResult> PrintDocument([FromBody] PrintRequest request)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(request.PdfPath) || !System.IO.File.Exists(request.PdfPath))
+            {
+                return BadRequest(new { message = "Le fichier PDF spécifié n'existe pas" });
+            }
+
+            if (string.IsNullOrEmpty(request.PrinterName))
+            {
+                return BadRequest(new { message = "Nom d'imprimante requis" });
+            }
+
+            // Verify printer exists
+            bool printerExists = false;
+            foreach (string printerName in PrinterSettings.InstalledPrinters)
+            {
+                if (printerName.Equals(request.PrinterName, StringComparison.OrdinalIgnoreCase))
+                {
+                    printerExists = true;
+                    break;
+                }
+            }
+
+            if (!printerExists)
+            {
+                return BadRequest(new { message = $"L'imprimante '{request.PrinterName}' n'est pas disponible" });
+            }
+
+            // Call the print service method
+            bool success = await _excelValidationService.PrintPdfDocument(request.PdfPath, request.PrinterName);
+
+            if (success)
+            {
+                // Log the print job
+                Console.WriteLine($"Document imprimé avec succès: {request.JobNumber} - {request.PaletteName} sur {request.PrinterName}");
+
+                return Ok(new
+                {
+                    message = "Document imprimé avec succès",
+                    printerName = request.PrinterName,
+                    jobNumber = request.JobNumber,
+                    paletteName = request.PaletteName
+                });
+            }
+            else
+            {
+                return StatusCode(500, new { message = "Erreur lors de l'impression du document" });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erreur d'impression: {ex.Message}");
+            return StatusCode(500, new { message = $"Erreur lors de l'impression: {ex.Message}" });
+        }
+    }
+
+    [HttpGet("serve")]
+    public IActionResult ServeFile(string path)
+    {
+        if (string.IsNullOrEmpty(path) || !path.StartsWith(@"P:\"))
+        {
+            return BadRequest("Invalid file path");
+        }
+
+        if (!System.IO.File.Exists(path))
+        {
+            return NotFound("File not found");
+        }
+
+        var extension = Path.GetExtension(path).ToLower();
+        var contentType = extension switch
+        {
+            ".pdf" => "application/pdf",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".png" => "image/png",
+            _ => "application/octet-stream"
+        };
+
+        var fileBytes = System.IO.File.ReadAllBytes(path);
+        return File(fileBytes, contentType);
+    }
+
+    // Request model for printing
+    public class PrintRequest
+    {
+        public string PdfPath { get; set; }
+        public string PrinterName { get; set; }
+        public string JobNumber { get; set; }
+        public string PaletteName { get; set; }
+    }
+
 
     //Methode pour Ajouter un 0 avant le numero de sequence si le numero est inferieur a 10
     private string FormatQRCode(string qrCode)

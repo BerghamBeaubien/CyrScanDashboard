@@ -30,7 +30,10 @@ public class Pallet
     public string Name { get; set; }
     public DateTime CreatedDate { get; set; }
     public int SequenceNumber { get; set; }
-    public int ScannedItems { get; set; } // This will be calculated dynamically
+    public int ScannedItems { get; set; }
+    public string hasPackagingBeenGenerated { get; set; }
+    public string packagingImagePath { get; set; }
+    public string packagingPdfPath { get; set; }
 }
 
 public class CreatePalletRequest
